@@ -1,13 +1,20 @@
-# Kafka Coordinator 架构：从零开始的演进式教程
+# Kafka Coordinator 架构：从零开始的完整教程
 
 ## 目录
 - [版本 1: 最简单的实现](#版本-1-最简单的实现)
 - [版本 2: 为什么需要持久化？](#版本-2-为什么需要持久化)
 - [版本 3: 为什么需要事件队列？](#版本-3-为什么需要事件队列)
 - [版本 4: 为什么需要 Batching？](#版本-4-为什么需要-batching)
+  - [深入解析：Batch 失败处理的权衡](#深入解析batch-失败处理的权衡)
 - [版本 5: 为什么需要 Deferred Events？](#版本-5-为什么需要-deferred-events)
+  - [深入解析：为什么不能只依赖 Producer ACK？](#深入解析为什么不能只依赖-producer-ack)
+  - [深入解析：ACK vs HW 时序对比](#深入解析ack-vs-hw-时序对比)
 - [版本 6: 为什么需要 MVCC？](#版本-6-为什么需要-mvcc)
+  - [深入解析：TimelineHashMap 的正确实现](#深入解析timelinehashmap-的正确实现)
+  - [深入解析：为什么 SnapshotRegistry 这么复杂？](#深入解析为什么-snapshotregistry-这么复杂)
 - [版本 7: 完整的 CoordinatorRuntime](#版本-7-完整的-coordinatorruntime)
+- [总结：为什么需要这些设计？](#总结为什么需要这些设计)
+- [高级主题：Revert 回滚机制](#高级主题revert-回滚机制)
 
 ---
 
@@ -493,6 +500,88 @@ flushBatch() {
 
 ---
 
+### 深入解析：Batch 失败处理的权衡
+
+#### 问题场景
+
+当一个 batch 中的某个 record 失败时，我们有两个选择：
+
+**选项 1: 部分成功**（让成功的成功，失败的失败）
+**选项 2: 全部失败**（Kafka 的选择）
+
+#### 为什么 Kafka 选择"全部失败"？
+
+```java
+void flushBatch() {
+    try {
+        // 批量写入所有 records
+        for (Record record : batch) {
+            producer.send(tp, record);
+        }
+        producer.flush();  // 等待所有写入完成
+
+        // 所有写入成功，加入 deferred queue
+        deferredEventQueue.add(lastWrittenOffset, batchFutures);
+
+    } catch (Exception e) {
+        // 任何一个失败，回滚所有状态
+        coordinator.revertLastWrittenOffset(baseOffset);
+
+        // Fail 所有 futures
+        for (CompletableFuture<Void> future : batchFutures) {
+            future.completeExceptionally(e);
+        }
+    }
+}
+```
+
+**核心原因：保证状态机一致性**
+
+```
+如果允许部分成功：
+- 内存有一些 replay
+- Log 缺失一些 records
+- 重启后无法恢复到正确状态
+
+如果全部失败：
+- 内存回滚到 batch 前
+- Log 也没有这些 records
+- 一致！
+```
+
+#### Trade-off 分析
+
+| 维度 | 部分成功 | 全部失败（Kafka） |
+|------|---------|-----------------|
+| **状态一致性** | ❌ 可能不一致 | ✅ 始终一致 |
+| **成功率** | ✅ 更高 | ❌ "连坐" |
+| **原子性** | ❌ 难保证 | ✅ 保证 |
+| **重启恢复** | ❌ 困难 | ✅ 可靠 |
+| **实现复杂度** | ❌ 需要补偿逻辑 | ✅ 简单回滚 |
+
+#### 为什么劣势是可接受的？
+
+1. **失败应该是罕见的**：在正常情况下，write 失败非常罕见
+2. **客户端可以重试**：因为状态已回滚，重试是安全的
+3. **Batch 通常不大**：默认 100-1000 个 records，重试代价不大
+4. **保证正确性 > 优化性能**：Coordinator 管理关键状态，正确性更重要
+
+#### 实际例子：转账场景
+
+```java
+// 如果允许部分成功：
+batch = [
+    record1: account1 -= 100,  // 扣款成功 ✅
+    record2: account2 += 100,  // 加款失败 ❌
+]
+// 结果：钱消失了！
+
+// 全部失败：
+两个都回滚 ← 安全！客户端可以重试整个转账
+```
+
+---
+
 ## 版本 5: 为什么需要 Deferred Events？
 
 ### 核心概念
@@ -681,8 +770,202 @@ Client          Coordinator         Local Log       Followers       Client Futur
   │                  │                  │                │                │
   │                  │──complete futures───────────────────────────────> │
   │                  │                  │                │                │
-  │  <─success────────────────────────────────────────────────────────── │
+  │  <─success────────────────────────────────────────────────────── │
 ```
+
+---
+
+### 深入解析：为什么不能只依赖 Producer ACK？
+
+#### Producer ACK 的局限
+
+**Producer ACK 只保证"写入成功"，但 Coordinator 需要知道"数据何时对读操作可见"（即 High Watermark 何时推进）。**
+
+#### 时间差问题
+
+```
+Time │ Leader             │ Producer ACK │ High Watermark │ 读操作能看到吗？
+─────┼────────────────────┼──────────────┼────────────────┼─────────────────
+  0  │ 写入 offset 100    │              │ 99             │ ❌
+  1  │ 发送给 followers   │              │ 99             │ ❌
+  2  │ followers 写入成功 │              │ 99             │ ❌
+  3  │ 收到 followers ack │ ✅ ACK 返回  │ 99             │ ❌ ← 问题！
+  4  │                    │              │ 99             │ ❌
+  5  │ Fetch 请求到达     │              │ 99             │ ❌
+  6  │ Leader 更新 HW     │              │ 100 ← 推进     │ ✅
+```
+
+**关键点：**
+- T3: Producer 收到 ACK（数据已安全）
+- T3-T6: **HW 还是 99**（读操作看不到 offset 100）
+- T6: HW 推进到 100（读操作才能看到）
+
+#### HW 推进机制
+
+HW 推进不是写入时触发的，而是 **下一次 Fetch 请求** 时触发的：
+
+```java
+// Leader 处理 Fetch 时更新 HW
+void handleFetchRequest(FetchRequest req) {
+    // 根据 follower 的 fetchOffset，推进 HW
+    updateHighWatermark(req.replica, req.fetchOffset);
+
+    // 然后返回数据
+    return fetchRecords();
+}
+```
+
+**可能有几毫秒到几百毫秒的延迟**
+
+#### 如果只用 Producer ACK 会怎样？
+
+```java
+// 错误的实现
+void processWriteEvent(WriteEvent event) {
+    // 1. Replay 到内存
+    offsets.put(event.key, event.offset);
+
+    // 2. 写入 log
+    RecordMetadata metadata = producer.send(record).get();  // 等待 ACK
+
+    // 3. 立即完成 future ← 错误！
+    event.future.complete(null);
+}
+
+// 问题场景
+Thread 1: Write
+  producer.send().get();  // ACK 返回
+  future.complete(null);  // 告诉客户端"成功"
+
+Thread 2: Read (同时)
+  Long offset = offsets.get(key);  // 读到了！
+  // 但实际上：
+  // - HW 还没推进
+  // - 如果 leader crash，新 leader 可能没有这个数据
+  // - 导致不一致！
+```
+
+#### Deferred Event Queue 的作用
+
+```java
+void processWriteEvent(WriteEvent event) {
+    // 1. Replay 到内存
+    offsets.put(event.key, event.offset);
+
+    // 2. 写入 log
+    RecordMetadata metadata = producer.send(record).get();
+    long writtenOffset = metadata.offset();
+
+    // 3. 不立即完成！而是加入 deferred queue
+    deferredEventQueue.add(writtenOffset, event);
+
+    // future 暂时不 complete
+}
+
+// 单独的监听器
+class HighWatermarkListener {
+    void onHighWatermarkUpdated(long newHW) {
+        // HW 推进时，complete 所有已安全的事件
+        deferredEventQueue.completeUpTo(newHW);
+    }
+}
+```
+
+#### 核心思想
+
+```
+Producer ACK:  "数据已写入，不会丢失"
+HW 推进:       "数据已提交，对读操作可见"
+
+Coordinator 需要的是：HW 推进！
+```
+
+---
+
+### 深入解析：ACK vs HW 时序对比
+
+#### 方式 1: 只用 Producer ACK（错误）
+
+```
+Time  │ Coordinator      │ Broker              │ Client          │ 问题
+──────┼──────────────────┼─────────────────────┼─────────────────┼─────────────────
+  0   │ 收到写请求        │                     │                 │
+  1   │ 更新内存: v=100   │                     │                 │
+  2   │ 调用 send()      │                     │                 │
+  3   │                  │ 写入 leader         │                 │
+  4   │                  │ 复制到 follower1    │                 │
+  5   │                  │ 复制到 follower2    │                 │
+  6   │                  │ 所有 ISR 确认       │                 │
+  7   │ ← ACK 返回       │                     │                 │
+  8   │ future.complete()│                     │ ← 收到"成功"    │ ← 太早！
+  9   │                  │                     │                 │
+ 10   │                  │                     │ 发起读请求       │
+ 11   │ 返回 v=100       │                     │ ← 读到 100      │ ← Dirty Read!
+      │                  │ HW = 99             │                 │    HW 还是 99
+ 12   │                  │ ↓                   │                 │
+ 13   │                  │ Follower Fetch请求  │                 │
+ 14   │                  │ 更新 replica offset │                 │
+ 15   │                  │ HW 推进到 100       │                 │ ← 太晚！
+```
+
+**问题：**
+- T8: 客户端收到成功，但 HW = 99
+- T11: 读操作读到了 uncommitted 数据（offset 100）
+- 如果 T12 时 leader crash，offset 100 可能丢失，但客户端已经看到了！
+
+#### 方式 2: 使用 Deferred Event Queue（正确）
+
+```
+Time  │ Coordinator      │ Broker              │ Deferred Queue  │ Client
+──────┼──────────────────┼─────────────────────┼─────────────────┼─────────────────
+  0   │ 收到写请求        │                     │                 │
+  1   │ 更新内存: v=100   │                     │                 │
+  2   │ 调用 send()      │                     │                 │
+  3   │                  │ 写入 leader         │                 │
+  4   │                  │ 复制到 follower1    │                 │
+  5   │                  │ 复制到 follower2    │                 │
+  6   │                  │ 所有 ISR 确认       │                 │
+  7   │ ← ACK 返回       │                     │                 │
+  8   │                  │                     │ ← add(100, fut) │ ← 加入队列
+  9   │                  │                     │ [waiting...]    │ [waiting...]
+ 10   │ 收到读请求        │                     │                 │
+ 11   │ 返回 null        │                     │                 │ ← 读到 null
+      │ (HW=99, v=100)   │ HW = 99             │                 │    正确！
+ 12   │                  │ ↓                   │                 │
+ 13   │                  │ Follower Fetch请求  │                 │
+ 14   │                  │ 更新 replica offset │                 │
+ 15   │                  │ HW 推进到 100       │                 │
+ 16   │ ← HW 更新事件    │                     │                 │
+ 17   │                  │                     │ completeUpTo(100)│
+ 18   │                  │                     │ → future.complete│ ← 收到"成功"
+ 19   │ 收到读请求        │                     │                 │
+ 20   │ 返回 v=100       │                     │                 │ ← 读到 100
+      │ (HW=100, v=100)  │ HW = 100            │                 │    正确！
+```
+
+**正确：**
+- T8: ACK 返回，但不立即返回成功，而是加入 deferred queue
+- T11: 读操作读到 null（因为 HW=99，offset 100 还未 committed）
+- T18: HW 推进到 100 后，才返回成功给客户端
+- T20: 读操作可以读到 100（因为 HW=100）
+
+#### 类比：银行转账
+
+```
+只用 Producer ACK:
+  你: "我已经转账了" (ACK 返回)
+  对方: "我还没收到钱" (HW 还没推进)
+  → 不一致！
+
+使用 Deferred Event Queue:
+  你: "我发起了转账" (写入 log)
+  银行: "转账处理中..." (deferred queue)
+  对方: "我收到钱了" (HW 推进)
+  银行: "转账成功" (future complete)
+  → 一致！
+```
+
+---
 
 ### 问题出现了！
 
@@ -924,6 +1207,308 @@ Long val = offsets.get("key1");
 #### 优势 3: 时间旅行
 - 可以读取任意 offset 的历史状态
 - 方便调试和审计
+
+---
+
+### 深入解析：TimelineHashMap 的正确实现
+
+#### 核心问题
+
+**如何高效地获取 "小于等于 currentOffset 的最大 offset 对应的值"？**
+
+这是 MVCC (Multi-Version Concurrency Control) 的核心操作。
+
+#### 错误实现：线性遍历（O(n)）
+
+```java
+// ❌ 错误：O(n) 时间复杂度
+V get(K key) {
+    List<VersionedValue<V>> timeline = data.get(key);
+    if (timeline == null) return null;
+
+    V result = null;
+    for (VersionedValue<V> vv : timeline) {
+        if (vv.offset <= currentOffset) {
+            result = vv.value;  // 不断覆盖，最后得到最大的
+        } else {
+            break;
+        }
+    }
+    return result;
+}
+```
+
+**问题：** 时间复杂度 O(n)，性能随版本数线性增长
+
+#### 正确实现：TreeMap.floorEntry()（O(log n)）
+
+```java
+// ✅ 正确：O(log n) 时间复杂度
+static class TimelineHashMap<K, V> {
+    private final Map<K, TreeMap<Long, V>> data = new HashMap<>();
+    private long currentOffset = 0;
+
+    V get(K key) {
+        TreeMap<Long, V> timeline = data.get(key);
+        if (timeline == null) return null;
+
+        // floorEntry(offset): 返回 <= offset 的最大 key 的 entry
+        Map.Entry<Long, V> entry = timeline.floorEntry(currentOffset);
+        return entry != null ? entry.getValue() : null;
+    }
+
+    void put(K key, V value) {
+        data.computeIfAbsent(key, k -> new TreeMap<>())
+            .put(currentOffset, value);
+    }
+}
+```
+
+#### TreeMap.floorEntry() 原理
+
+`TreeMap` 是基于**红黑树**实现的有序 Map：
+
+```java
+TreeMap<Long, V> timeline = new TreeMap<>();
+timeline.put(0L, "v0");
+timeline.put(5L, "v5");
+timeline.put(10L, "v10");
+
+// floorEntry(offset): 返回 <= offset 的最大 key
+timeline.floorEntry(3L);   // (0, "v0")  - 最大的 <= 3 的 key 是 0
+timeline.floorEntry(5L);   // (5, "v5")  - 最大的 <= 5 的 key 是 5
+timeline.floorEntry(7L);   // (5, "v5")  - 最大的 <= 7 的 key 是 5
+timeline.floorEntry(15L);  // (10, "v10") - 最大的 <= 15 的 key 是 10
+```
+
+**时间复杂度：O(log n)** - 红黑树的查找时间
+
+#### MVCC 读取示例
+
+```java
+TimelineHashMap<String, Integer> state = new TimelineHashMap<>();
+
+// 模拟 3 次写入
+state.setCurrentOffset(0);
+state.put("balance", 100);  // offset=0: balance=100
+
+state.setCurrentOffset(5);
+state.put("balance", 200);  // offset=5: balance=200
+
+state.setCurrentOffset(10);
+state.put("balance", 300);  // offset=10: balance=300
+
+// Timeline: {0→100, 5→200, 10→300}
+
+// 读取不同 offset 时刻的值
+state.setCurrentOffset(0);
+System.out.println(state.get("balance"));  // 100
+
+state.setCurrentOffset(3);
+System.out.println(state.get("balance"));  // 100 (使用 offset=0 的值)
+
+state.setCurrentOffset(7);
+System.out.println(state.get("balance"));  // 200 (使用 offset=5 的值)
+
+state.setCurrentOffset(15);
+System.out.println(state.get("balance"));  // 300 (使用 offset=10 的值)
+```
+
+#### 性能对比
+
+| 操作 | List 线性遍历 | TreeMap.floorEntry() |
+|------|---------------|----------------------|
+| **get()** | O(n) | O(log n) |
+| **put()** | O(1) | O(log n) |
+| **回滚** | O(1) | O(1) |
+
+**结论：** TreeMap 的 **get() 性能远优于线性遍历**，在版本数较多时差异更明显
+
+---
+
+### 深入解析：为什么 SnapshotRegistry 这么复杂？
+
+#### 简化版 vs Kafka 的实现
+
+| 特性 | 简化版 | Kafka SnapshotRegistry |
+|------|--------|----------------------|
+| **核心实现** | 单个 `TimelineHashMap` | `SnapshotRegistry` + `Snapshot` + `Revertable` + `Delta` |
+| **代码行数** | ~100 行 | ~500+ 行 |
+| **回滚机制** | 修改 `currentOffset` | 删除 Snapshot 并调用 `executeRevert()` |
+| **内存管理** | 手动 `deleteAfter()` | 自动 + WeakReference |
+| **多数据结构** | 单个 HashMap | 多个 Timeline 数据结构 |
+
+#### 核心区别 1: 中心化管理
+
+**简化版：** 每个 TimelineHashMap 独立管理
+
+```java
+// 需要手动同步 3 个 TimelineHashMap
+TimelineHashMap<String, Integer> map1 = new TimelineHashMap<>();
+TimelineHashMap<String, String> map2 = new TimelineHashMap<>();
+TimelineHashMap<String, List<String>> map3 = new TimelineHashMap<>();
+
+// 回滚（需要手动同步）
+map1.revertTo(5);
+map2.revertTo(5);
+map3.revertTo(5);
+// 问题：如果忘记回滚 map3，状态不一致！
+```
+
+**Kafka：** 中心化管理
+
+```java
+// 创建中心化的 SnapshotRegistry
+SnapshotRegistry registry = new SnapshotRegistry(new LogContext());
+
+// 所有数据结构自动注册
+TimelineHashMap<String, Integer> map1 = new TimelineHashMap<>(registry, 10);
+TimelineHashMap<String, String> map2 = new TimelineHashMap<>(registry, 10);
+TimelineHashMap<String, List<String>> map3 = new TimelineHashMap<>(registry, 10);
+
+// 回滚（一次调用，所有数据结构自动同步）
+registry.revertToSnapshot(5);
+// ✅ map1, map2, map3 都回滚到 epoch 5
+```
+
+#### 核心区别 2: 显式 Snapshot 对象
+
+**简化版：** 隐式快照
+
+```java
+// 没有显式的 Snapshot 对象
+// 快照隐含在 TreeMap 的 entry 中
+Map<K, TreeMap<Long, V>> data;
+```
+
+**Kafka：** 显式 Snapshot
+
+```java
+class Snapshot {
+    private final long epoch;
+    private IdentityHashMap<Revertable, Delta> map;
+    private Snapshot prev;  // 双向链表
+    private Snapshot next;
+}
+
+// Snapshot 双向链表（按 epoch 排序）
+head ↔ Snapshot(0) ↔ Snapshot(5) ↔ Snapshot(10) ↔ Snapshot(15)
+```
+
+**优势：**
+- ✅ 独立管理每个 Snapshot
+- ✅ O(1) 访问和遍历
+- ✅ 可以合并和删除快照
+
+#### 核心区别 3: Delta 增量存储
+
+**简化版：** 存储完整值
+
+```java
+// 每个版本存储完整的值
+TreeMap<Long, V> timeline;
+timeline.put(0, "value at offset 0");    // 存储完整值
+timeline.put(5, "value at offset 5");    // 存储完整值
+timeline.put(10, "value at offset 10");  // 存储完整值
+```
+
+**Kafka：** 增量 Delta
+
+```java
+// 初始状态: {a=1, b=2, c=3}
+
+// Snapshot(0): 空 Delta（初始状态）
+
+// Snapshot(5): Delta {a=10}  // 只记录 a 的变更
+// 当前状态: {a=10, b=2, c=3}
+
+// Snapshot(10): Delta {b=20}  // 只记录 b 的变更
+// 当前状态: {a=10, b=20, c=3}
+```
+
+**优势：** 只存储变更，减少内存占用
+
+#### 核心区别 4: WeakReference 自动内存管理
+
+**简化版：** 手动清理
+
+```java
+void deleteAfter(long offset) {
+    for (TreeMap<Long, V> timeline : data.values()) {
+        timeline.tailMap(offset + 1).clear();  // 手动删除
+    }
+}
+// 需要手动调用，容易忘记导致内存泄漏
+```
+
+**Kafka：** 自动清理
+
+```java
+class SnapshotRegistry {
+    // 使用 WeakReference 存储 Revertable
+    private List<WeakReference<Revertable>> revertables;
+
+    void register(Revertable revertable) {
+        revertables.add(new WeakReference<>(revertable));
+        if (numRegistrationsSinceScrub > maxRegistrationsSinceScrub) {
+            scrub();  // 自动清理过期引用
+        }
+    }
+}
+```
+
+#### 为什么 Kafka 需要这么复杂？
+
+**1. 多数据结构同步回滚**
+
+ShareCoordinatorShard 需要管理多个 Timeline 数据结构：
+
+```java
+class ShareCoordinatorShard {
+    private final TimelineHashMap<SharePartitionKey, ShareGroupOffset> shareStateMap;
+    private final TimelineHashMap<SharePartitionKey, Integer> leaderEpochMap;
+    private final TimelineHashMap<SharePartitionKey, Integer> snapshotUpdateCount;
+    private final TimelineHashMap<SharePartitionKey, Integer> stateEpochMap;
+
+    // 使用 SnapshotRegistry：一行代码同步回滚
+    void revert(long offset) {
+        registry.revertToSnapshot(offset);  // ✅ 自动同步
+    }
+}
+```
+
+**2. 生产环境需求**
+
+| 需求 | 简化版 | Kafka |
+|------|--------|-------|
+| 多数据结构同步回滚 | ❌ 手动 | ✅ 自动 |
+| 防止内存泄漏 | ❌ 手动清理 | ✅ WeakReference |
+| 快照合并优化 | ❌ 不支持 | ✅ 智能合并 |
+| 增量存储 | ❌ 完整值 | ✅ Delta |
+| 一致性保证 | ❌ 易出错 | ✅ 强一致性 |
+
+#### 总结
+
+| 维度 | 简化版 | Kafka SnapshotRegistry |
+|------|--------|----------------------|
+| **目标** | 教学演示 | 生产级系统 |
+| **复杂度** | 简单 | 复杂 |
+| **功能** | 基础 MVCC | 完整快照管理框架 |
+| **内存管理** | 手动 | 自动 + 优化 |
+| **一致性** | 弱（易出错） | 强（原子操作） |
+| **扩展性** | 单一数据结构 | 多种数据结构 |
+
+**关键洞察：**
+
+简化版是为了**教学**，帮助快速理解 MVCC 核心原理。
+
+Kafka 的 SnapshotRegistry 是为了**生产**，解决大规模分布式系统的实际问题：
+- 多数据结构同步
+- 内存管理
+- 一致性保证
+- 扩展性
+
+两者的**核心思想一致**（MVCC + 多版本存储），但**工程实现复杂度**完全不同！
 
 ---
 
@@ -1202,3 +1787,299 @@ Client 收到响应
 - ✅ 可扩展 (分区级并行)
 
 每一层设计都解决了一个实际问题，缺一不可！
+
+---
+
+## 高级主题：Revert 回滚机制
+
+### 功能概述
+
+基于 TimelineHashMap 的 MVCC 特性，我们可以实现状态回滚功能，这在以下场景非常有用：
+
+#### 使用场景
+
+**场景 1: 错误恢复**
+
+```java
+// 当前状态正确
+coordinator.writeState(key, correctState, "正常操作");
+coordinator.createCheckpoint("before_update");
+
+// 由于 bug，写入了错误的状态
+coordinator.writeState(key, buggyState, "Bug 导致的错误状态");
+
+// 发现错误，立即回滚
+coordinator.revertToCheckpoint("before_update");
+```
+
+**优势：** 秒级恢复，无需重启服务，避免数据丢失
+
+**场景 2: 事务支持**
+
+```java
+// BEGIN TRANSACTION
+long txStart = coordinator.getCurrentOffset();
+
+try {
+    coordinator.writeState(key1, state1, "操作 1");
+    coordinator.writeState(key2, state2, "操作 2");
+    coordinator.writeState(key3, state3, "操作 3");
+
+    // 验证一致性
+    if (!validateConsistency(key1, key2, key3)) {
+        throw new Exception("状态不一致");
+    }
+
+    // COMMIT (do nothing, changes are already written)
+
+} catch (Exception e) {
+    // ROLLBACK
+    coordinator.revertToVersion(txStart);
+    System.err.println("事务回滚: " + e.getMessage());
+}
+```
+
+**场景 3: 时间旅行调试**
+
+```java
+// 列出所有版本
+List<Long> versions = coordinator.listVersions(key);
+System.out.println("历史版本: " + versions);  // [0, 5, 10, 15, 20]
+
+// 查看每个版本的状态
+for (Long version : versions) {
+    ShareGroupState state = coordinator.getStateAtVersion(key, version);
+    System.out.println("Version " + version + ": " + state);
+}
+
+// 回到问题发生前的版本
+coordinator.revertToVersion(15);
+
+// 重新执行操作，观察是否能重现问题
+coordinator.writeState(key, newState, "重现问题");
+```
+
+### 实现原理
+
+#### 1. TimelineHashMap 的 MVCC 特性
+
+```java
+class TimelineHashMap<K, V> {
+    // 每个 key 对应一个 TreeMap<Long, V>
+    private final Map<K, TreeMap<Long, V>> data = new HashMap<>();
+    private long currentOffset = 0;
+
+    void put(K key, V value) {
+        // 在当前 offset 写入新版本
+        data.computeIfAbsent(key, k -> new TreeMap<>())
+            .put(currentOffset, value);
+    }
+
+    V get(K key) {
+        TreeMap<Long, V> timeline = data.get(key);
+        if (timeline == null) return null;
+
+        // floorEntry: 返回 <= currentOffset 的最大 offset
+        Map.Entry<Long, V> entry = timeline.floorEntry(currentOffset);
+        return entry != null ? entry.getValue() : null;
+    }
+}
+```
+
+**关键点：**
+- `put()` 不覆盖老版本，而是添加新版本
+- `get()` 使用 `floorEntry()` 获取当前 offset 可见的版本
+- 回滚只需修改 `currentOffset`，不需要删除数据
+
+#### 2. 回滚机制
+
+```java
+void revertTo(long targetOffset) {
+    // 修改 currentOffset
+    this.currentOffset = targetOffset;
+}
+```
+
+**示例：**
+
+```
+Timeline: {0→v0, 5→v1, 10→v2, 15→v3}
+
+currentOffset = 15:
+  get() 返回 v3 (floorEntry(15) = 15)
+
+revertTo(7):
+  currentOffset = 7
+  get() 返回 v1 (floorEntry(7) = 5)
+
+revertTo(0):
+  currentOffset = 0
+  get() 返回 v0 (floorEntry(0) = 0)
+```
+
+**核心优势：**
+- O(1) 回滚时间
+- 不需要复制数据
+- 可以前进和后退
+
+#### 3. 检查点机制
+
+```java
+class EnhancedShareCoordinatorShard {
+    private final Map<String, Long> checkpoints = new HashMap<>();
+
+    void createCheckpoint(String name) {
+        long offset = shareStateMap.getCurrentOffset();
+        checkpoints.put(name, offset);
+    }
+
+    void revertToCheckpoint(String name) {
+        Long offset = checkpoints.get(name);
+        if (offset != null) {
+            revertToVersion(offset);
+        }
+    }
+}
+```
+
+**类比数据库的 SAVEPOINT：**
+
+```sql
+-- SQL
+SAVEPOINT sp1;
+UPDATE ...;
+ROLLBACK TO sp1;
+
+-- Coordinator
+createCheckpoint("sp1");
+writeState(...);
+revertToCheckpoint("sp1");
+```
+
+### API 设计
+
+```java
+public interface VersionedCoordinator {
+    /**
+     * 回滚到指定版本
+     */
+    void revertToVersion(long targetOffset);
+
+    /**
+     * 列出某个 key 的所有历史版本
+     */
+    List<Long> listVersions(SharePartitionKey key);
+
+    /**
+     * 获取指定版本的状态（不改变当前 offset）
+     */
+    ShareGroupState getStateAtVersion(SharePartitionKey key, long offset);
+
+    /**
+     * 创建命名检查点
+     */
+    void createCheckpoint(String name);
+
+    /**
+     * 回滚到检查点
+     */
+    void revertToCheckpoint(String name);
+
+    /**
+     * 清理历史版本
+     */
+    void cleanupOldVersions(long keepAfterOffset);
+}
+```
+
+### 性能分析
+
+| 操作 | 时间复杂度 | 说明 |
+|------|-----------|------|
+| `writeState()` | O(log n) | TreeMap.put() |
+| `readState()` | O(log n) | TreeMap.floorEntry() |
+| `revertToVersion()` | O(1) | 只修改 currentOffset |
+| `listVersions()` | O(k) | k = 版本数 |
+| `getStateAtVersion()` | O(log n) | 临时修改 offset + get() |
+| `createCheckpoint()` | O(1) | HashMap.put() |
+| `cleanupOldVersions()` | O(m × k) | m = key 数，k = 待删除版本数 |
+
+### 与原版 Kafka 的对比
+
+**原版 Kafka ShareCoordinator：**
+
+```java
+class ShareCoordinatorShard {
+    // 只保留当前版本
+    private final TimelineHashMap<SharePartitionKey, ShareGroupOffset> shareStateMap;
+
+    // 写入会覆盖旧状态（通过 MVCC 的 offset 推进）
+    void replay(long offset, CoordinatorRecord record) {
+        shareStateMap.put(key, newState);
+    }
+
+    // 无法回滚
+}
+```
+
+**限制：**
+- ❌ 无法回滚到历史版本
+- ❌ 错误数据一旦写入，只能通过新的写入来修正
+- ❌ 无法查看历史状态
+- ✅ 内存占用小（只保留必要的历史版本）
+
+**增强版 ShareCoordinator：**
+
+```java
+class EnhancedShareCoordinatorShard {
+    // 保留多个版本
+    private final TimelineHashMap<SharePartitionKey, ShareGroupState> shareStateMap;
+    private final Map<Long, String> operationLog;
+    private final Map<String, Long> checkpoints;
+
+    // 支持回滚
+    void revertToVersion(long targetOffset) { ... }
+
+    // 支持查看历史
+    List<Long> listVersions(SharePartitionKey key) { ... }
+
+    // 支持检查点
+    void createCheckpoint(String name) { ... }
+}
+```
+
+**优势：**
+- ✅ 支持回滚
+- ✅ 支持查看历史
+- ✅ 支持事务语义
+- ✅ 便于调试和问题分析
+- ⚠️ 内存占用增加（需要清理策略）
+
+### 适用场景
+
+✅ **适合：**
+- 需要错误恢复的生产环境
+- 需要调试的开发环境
+- 需要事务语义的场景
+- 需要历史查询的分析场景
+
+❌ **不适合：**
+- 内存极度受限的环境
+- 写入频率极高（> 10K/s）且版本保留时间长
+- 不需要回滚功能的简单场景
+
+### 总结
+
+| 维度 | 价值 |
+|------|------|
+| **可靠性** | 快速从错误中恢复，降低故障影响 |
+| **可调试性** | 时间旅行调试，快速定位问题 |
+| **可测试性** | 回滚测试数据，无需重启服务 |
+| **灵活性** | 支持事务、A/B测试等高级功能 |
+
+**实现要点：**
+1. 利用 MVCC：TimelineHashMap 天然支持多版本
+2. 低成本回滚：修改 currentOffset 即可，无需数据拷贝
+3. 内存管理：定期清理历史版本
+4. 同步一致性：多个 TimelineHashMap 需要同步回滚
+5. 检查点机制：提供用户友好的回滚接口
