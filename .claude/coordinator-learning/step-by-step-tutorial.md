@@ -2083,3 +2083,616 @@ class EnhancedShareCoordinatorShard {
 3. 内存管理：定期清理历史版本
 4. 同步一致性：多个 TimelineHashMap 需要同步回滚
 5. 检查点机制：提供用户友好的回滚接口
+
+---
+
+## 深入理解：SnapshotRegistry 的演进史
+
+在 V6 的 MVCC 部分，我们提到了 Kafka 使用 `SnapshotRegistry` 来统一管理所有 Timeline 数据结构。但为什么需要这么复杂的设计？让我们通过代码演进来理解。
+
+**学习方式：** 通过可运行的代码展示每个版本如何解决前一个版本的具体问题。
+
+**完整代码：** `.claude/coordinator-learning/snapshotregistry-evolution.java`
+
+### 版本 1: 每个数据结构自己管理版本
+
+**问题场景：** ShareCoordinator 需要管理多个 TimelineHashMap，最简单的想法是每个 Map 自己维护 currentOffset。
+
+```java
+class TimelineHashMap<K, V> {
+    private final Map<K, TreeMap<Long, V>> data = new HashMap<>();
+    private long currentOffset = 0;  // 每个 Map 自己的 offset
+    
+    public void setOffset(long offset) {
+        this.currentOffset = offset;
+    }
+    
+    public void put(K key, V value) {
+        data.computeIfAbsent(key, k -> new TreeMap<>())
+            .put(currentOffset, value);
+    }
+    
+    public V get(K key) {
+        TreeMap<Long, V> timeline = data.get(key);
+        if (timeline == null) return null;
+        
+        Map.Entry<Long, V> entry = timeline.floorEntry(currentOffset);
+        return entry != null ? entry.getValue() : null;
+    }
+}
+
+class ShareCoordinator {
+    // 需要同步管理 3 个 TimelineHashMap
+    private final TimelineHashMap<String, Integer> stateMap = new TimelineHashMap<>();
+    private final TimelineHashMap<String, Integer> leaderEpochMap = new TimelineHashMap<>();
+    private final TimelineHashMap<String, Integer> stateEpochMap = new TimelineHashMap<>();
+    
+    public void writeState(String key, int state, int leaderEpoch, int stateEpoch, long offset) {
+        // 必须手动同步所有 Map 的 offset
+        stateMap.setOffset(offset);
+        leaderEpochMap.setOffset(offset);
+        stateEpochMap.setOffset(offset);
+        
+        stateMap.put(key, state);
+        leaderEpochMap.put(key, leaderEpoch);
+        stateEpochMap.put(key, stateEpoch);
+    }
+    
+    public void revertToSnapshot(long offset) {
+        // 必须手动回滚所有 Map
+        stateMap.revertTo(offset);
+        leaderEpochMap.revertTo(offset);
+        stateEpochMap.revertTo(offset);
+    }
+}
+```
+
+**问题暴露：**
+
+❌ **问题 1：** 如果忘记同步某个 Map 的 offset？
+- 例如：只设置了 `stateMap.setOffset(1)`，忘了 `leaderEpochMap`
+- 结果：状态不一致！stateMap 在版本 1，leaderEpochMap 在版本 0
+
+❌ **问题 2：** 新增一个 TimelineHashMap 怎么办？
+- 需要修改所有 `writeState()` 和 `revertToSnapshot()` 的代码
+- 容易遗漏，导致 bug
+
+❌ **问题 3：** 代码重复
+- 每次都要写 3 次 `setOffset()`，容易出错
+
+---
+
+### 版本 2: 中心化的 SnapshotRegistry
+
+**解决方案：** 创建一个中心化的 SnapshotRegistry，所有 TimelineHashMap 注册到 registry，由它统一管理 offset。
+
+```java
+class SnapshotRegistry {
+    private long currentOffset = 0;
+    private final List<Revertable> revertables = new ArrayList<>();
+    
+    public long currentOffset() {
+        return currentOffset;
+    }
+    
+    public void setCurrentOffset(long offset) {
+        this.currentOffset = offset;
+    }
+    
+    public void register(Revertable revertable) {
+        revertables.add(revertable);
+    }
+    
+    public void revertToSnapshot(long targetOffset) {
+        // 自动回滚所有注册的数据结构
+        for (Revertable revertable : revertables) {
+            revertable.revert(targetOffset);
+        }
+        this.currentOffset = targetOffset;
+    }
+}
+
+interface Revertable {
+    void revert(long targetOffset);
+}
+
+class TimelineHashMap<K, V> implements Revertable {
+    private final SnapshotRegistry registry;
+    
+    public TimelineHashMap(SnapshotRegistry registry) {
+        this.registry = registry;
+        registry.register(this);  // 自动注册
+    }
+    
+    public void put(K key, V value) {
+        long offset = registry.currentOffset();  // 使用统一的 offset
+        // ...
+    }
+}
+
+class ShareCoordinator {
+    private final SnapshotRegistry registry = new SnapshotRegistry();
+    private final TimelineHashMap<String, Integer> stateMap;
+    private final TimelineHashMap<String, Integer> leaderEpochMap;
+    private final TimelineHashMap<String, Integer> stateEpochMap;
+    
+    public ShareCoordinator() {
+        // 自动注册到 registry
+        this.stateMap = new TimelineHashMap<>(registry);
+        this.leaderEpochMap = new TimelineHashMap<>(registry);
+        this.stateEpochMap = new TimelineHashMap<>(registry);
+    }
+    
+    public void writeState(String key, int state, int leaderEpoch, int stateEpoch, long offset) {
+        // 只需设置一次 offset
+        registry.setCurrentOffset(offset);
+        
+        stateMap.put(key, state);
+        leaderEpochMap.put(key, leaderEpoch);
+        stateEpochMap.put(key, stateEpoch);
+    }
+    
+    public void revertToSnapshot(long offset) {
+        // 一行代码，自动回滚所有 Map
+        registry.revertToSnapshot(offset);
+    }
+}
+```
+
+**优势：**
+
+✅ 统一管理 offset，不会不一致  
+✅ 新增 Map 只需 `new TimelineHashMap(registry)`  
+✅ 回滚一行代码，自动同步所有数据结构
+
+**新问题：**
+
+❌ **如何管理多个 snapshot？**
+- 当前只能记住一个 currentOffset
+- 如果想保留多个快照（例如 offset 0, 5, 10），无法实现
+
+---
+
+### 版本 3: Snapshot 对象
+
+**解决方案：** 引入显式的 Snapshot 对象，使用 HashMap 存储多个 snapshot。
+
+```java
+class Snapshot {
+    private final long epoch;
+    
+    public Snapshot(long epoch) {
+        this.epoch = epoch;
+    }
+    
+    public long epoch() {
+        return epoch;
+    }
+}
+
+class SnapshotRegistry {
+    private final Map<Long, Snapshot> snapshots = new HashMap<>();
+    private long currentOffset = 0;
+    private final List<Revertable> revertables = new ArrayList<>();
+    
+    // 创建快照
+    public void createSnapshot(long epoch) {
+        Snapshot snapshot = new Snapshot(epoch);
+        snapshots.put(epoch, snapshot);
+    }
+    
+    // 回滚到快照
+    public void revertToSnapshot(long targetEpoch) {
+        Snapshot target = snapshots.get(targetEpoch);
+        if (target == null) {
+            throw new RuntimeException("快照不存在: " + targetEpoch);
+        }
+        
+        // 删除所有 > targetEpoch 的快照
+        snapshots.keySet().removeIf(epoch -> epoch > targetEpoch);
+        
+        // 回滚所有数据结构
+        for (Revertable revertable : revertables) {
+            revertable.revert(targetEpoch);
+        }
+        
+        this.currentOffset = targetEpoch;
+    }
+    
+    public List<Long> listSnapshots() {
+        return new ArrayList<>(snapshots.keySet()).stream()
+            .sorted()
+            .toList();
+    }
+}
+```
+
+**使用示例：**
+
+```java
+SnapshotRegistry registry = new SnapshotRegistry();
+TimelineHashMap<String, Integer> map = new TimelineHashMap<>(registry);
+
+// 创建版本 0
+registry.createSnapshot(0);
+map.put("key1", 100);
+
+// 创建版本 5
+registry.createSnapshot(5);
+map.put("key1", 200);
+
+// 创建版本 10
+registry.createSnapshot(10);
+map.put("key1", 300);
+
+System.out.println("快照列表: " + registry.listSnapshots());  // [0, 5, 10]
+
+// 回滚到版本 5
+registry.revertToSnapshot(5);
+System.out.println("剩余快照: " + registry.listSnapshots());  // [0, 5]
+```
+
+**优势：**
+
+✅ 可以保留多个快照  
+✅ 回滚时自动删除未来的快照
+
+**新问题：**
+
+❌ **内存占用**
+- 每个版本都存储完整的值
+- 如果值很大（例如 1KB），10 个版本 = 10KB
+- 能否只存储变更？
+
+---
+
+### 版本 4: Delta 机制
+
+**解决方案：** Snapshot 不存储完整值，只存储 Delta（变更）。回滚时应用 Delta 来恢复状态。
+
+```java
+interface Delta {
+    void apply();
+    void mergeFrom(Delta other);
+}
+
+class HashMapDelta<K, V> implements Delta {
+    private final Map<K, V> oldValues = new HashMap<>();  // 记录旧值
+    private final Set<K> removedKeys = new HashSet<>();
+    
+    public void recordPut(K key, V oldValue) {
+        oldValues.put(key, oldValue);
+    }
+    
+    @Override
+    public void apply() {
+        // 应用 Delta：恢复旧值
+        for (Map.Entry<K, V> entry : oldValues.entrySet()) {
+            // 恢复到旧值
+        }
+    }
+}
+
+class Snapshot {
+    private final long epoch;
+    private final Map<Revertable, Delta> deltas = new IdentityHashMap<>();
+    
+    public void setDelta(Revertable owner, Delta delta) {
+        deltas.put(owner, delta);
+    }
+    
+    public void applyDeltas() {
+        for (Delta delta : deltas.values()) {
+            delta.apply();
+        }
+    }
+}
+
+class SnapshotRegistry {
+    public void createSnapshot(long epoch) {
+        Snapshot snapshot = new Snapshot(epoch);
+        snapshots.put(epoch, snapshot);
+        
+        // 让每个 Revertable 创建自己的 Delta
+        for (Revertable revertable : revertables) {
+            Delta delta = revertable.createDelta(epoch);
+            if (delta != null) {
+                snapshot.setDelta(revertable, delta);
+            }
+        }
+    }
+    
+    public void revertToSnapshot(long targetEpoch) {
+        Snapshot target = snapshots.get(targetEpoch);
+        
+        // 应用 Delta 回滚
+        target.applyDeltas();
+        
+        this.currentOffset = targetEpoch;
+    }
+}
+```
+
+**内存对比：**
+
+```
+假设一个 HashMap 有 100 个 key，每个 value 1KB：
+
+完整快照存储（V3）:
+  每个快照: 100 × 1KB = 100KB
+  10 个快照: 1MB
+
+Delta 增量存储（V4）:
+  每个快照: 只存储变更的 key（假设 10 个）= 10KB
+  10 个快照: 100KB
+  
+内存节省 10 倍！
+```
+
+**优势：**
+
+✅ 每个快照只存储变更（Delta）  
+✅ 内存占用大大减少
+
+**新问题：**
+
+❌ **内存泄漏**
+- 如果 TimelineHashMap 对象被 GC 回收了
+- 但 `registry.revertables` 还持有强引用
+- 会导致内存泄漏！
+
+---
+
+### 版本 5: WeakReference
+
+**解决方案：** 使用 WeakReference 存储 Revertable，允许 GC 回收不再使用的数据结构。
+
+```java
+class SnapshotRegistry {
+    // 使用 WeakReference 而不是强引用
+    private List<WeakReference<Revertable>> revertables = new ArrayList<>();
+    private int numRegistrations = 0;
+    private int numScrubs = 0;
+    
+    public void register(Revertable revertable) {
+        revertables.add(new WeakReference<>(revertable));
+        numRegistrations++;
+        
+        // 每 5 次注册，清理一次过期的 WeakReference
+        if (numRegistrations % 5 == 0) {
+            scrub();
+        }
+    }
+    
+    // 清理过期的 WeakReference
+    private void scrub() {
+        List<WeakReference<Revertable>> newList = new ArrayList<>();
+        for (WeakReference<Revertable> ref : revertables) {
+            if (ref.get() != null) {  // 对象还存活
+                newList.add(ref);
+            }
+        }
+        revertables = newList;
+        numScrubs++;
+    }
+    
+    public void createSnapshot(long epoch) {
+        Snapshot snapshot = new Snapshot(epoch);
+        snapshots.put(epoch, snapshot);
+        
+        // 遍历所有还存活的 Revertable
+        for (WeakReference<Revertable> ref : revertables) {
+            Revertable revertable = ref.get();
+            if (revertable != null) {
+                Delta delta = revertable.createDelta(epoch);
+                if (delta != null) {
+                    snapshot.setDelta(revertable, delta);
+                }
+            }
+        }
+    }
+}
+```
+
+**示例：**
+
+```java
+SnapshotRegistry registry = new SnapshotRegistry();
+
+{
+    TimelineHashMap<String, Integer> map = new TimelineHashMap<>(registry, "Map1");
+    // map 被注册到 registry
+    
+    // ... 使用 map ...
+    
+} // map 离开作用域
+
+// 如果使用强引用，registry 会一直持有 map，导致内存泄漏
+// 使用 WeakReference，GC 可以回收 map
+
+System.gc();  // 触发 GC
+Thread.sleep(100);
+
+// scrub() 会在下次注册时自动清理过期引用
+```
+
+**优势：**
+
+✅ 使用 WeakReference，允许 GC 回收  
+✅ 定期 scrub 清理过期引用  
+✅ 防止内存泄漏
+
+**新问题：**
+
+❌ **删除中间快照的正确性**
+- 如果有快照 [0, 5, 10, 15]
+- 删除快照 10 后，查询 offset=12 会得到什么？
+- 答案应该是快照 10 的状态，但快照 10 已经被删了！
+
+---
+
+### 版本 6: Snapshot 合并
+
+**解决方案：** 删除快照时，将其 Delta 合并到前一个快照，这样删除中间快照不会影响查询结果。
+
+```java
+class Snapshot {
+    private final long epoch;
+    private Map<String, Delta> deltas = new HashMap<>();
+    
+    // 双向链表
+    private Snapshot prev = this;
+    private Snapshot next = this;
+    
+    public Snapshot prev() { return prev; }
+    public Snapshot next() { return next; }
+    
+    public void appendNext(Snapshot newNext) {
+        newNext.prev = this;
+        newNext.next = this.next;
+        this.next.prev = newNext;
+        this.next = newNext;
+    }
+    
+    // 从链表中移除
+    public void erase() {
+        this.next.prev = this.prev;
+        this.prev.next = this.next;
+        this.deltas = null;  // 清空 Delta
+    }
+    
+    // 合并另一个快照的 Delta 到当前快照
+    public void mergeFrom(Snapshot source) {
+        for (Map.Entry<String, Delta> entry : source.deltas.entrySet()) {
+            String owner = entry.getKey();
+            Delta sourceDelta = entry.getValue();
+            
+            Delta myDelta = this.deltas.get(owner);
+            if (myDelta == null) {
+                // 我没有这个 Delta，直接拷贝
+                this.deltas.put(owner, sourceDelta);
+            } else {
+                // 我有这个 Delta，合并
+                myDelta.mergeFrom(sourceDelta);
+            }
+        }
+    }
+}
+
+class SnapshotRegistry {
+    private final Map<Long, Snapshot> snapshots = new HashMap<>();
+    private final Snapshot head = new Snapshot(Long.MIN_VALUE);  // 哨兵节点
+    
+    public void createSnapshot(long epoch) {
+        Snapshot last = head.prev();
+        
+        Snapshot snapshot = new Snapshot(epoch);
+        last.appendNext(snapshot);  // 插入双向链表
+        snapshots.put(epoch, snapshot);
+    }
+    
+    public void deleteSnapshot(long epoch) {
+        Snapshot snapshot = snapshots.get(epoch);
+        if (snapshot == null) return;
+        
+        Snapshot prev = snapshot.prev();
+        
+        if (prev != head) {
+            // 将当前快照的 Delta 合并到前一个快照
+            prev.mergeFrom(snapshot);
+        }
+        
+        // 从链表中移除
+        snapshot.erase();
+        snapshots.remove(epoch);
+    }
+}
+```
+
+**示例：**
+
+```
+初始状态:
+  Snapshot(0): {key1=100}
+  Snapshot(5): Delta {key1=200}     → 状态: {key1=200}
+  Snapshot(10): Delta {key2=300}    → 状态: {key1=200, key2=300}
+  
+删除 Snapshot(5):
+  1. 合并 Delta {key1=200} 到 Snapshot(0)
+  2. Snapshot(0): Delta {key1=200}
+  3. 删除 Snapshot(5)
+  
+结果:
+  Snapshot(0): Delta {key1=200}  → 状态: {key1=200}
+  Snapshot(10): Delta {key2=300} → 状态: {key1=200, key2=300}
+  
+现在查询 offset=7 时，得到 Snapshot(0) 的状态 {key1=200}（正确！）
+```
+
+**优势：**
+
+✅ 删除中间快照时，Delta 被合并到前一个快照  
+✅ 查询结果保持正确  
+✅ 不会丢失历史信息
+
+---
+
+## 总结：SnapshotRegistry 的演进
+
+| 版本 | 问题 | 解决方案 | 关键技术 |
+|------|------|----------|---------|
+| V1 | 手动同步多个 Map，容易出错 | 中心化管理 | Revertable 接口 |
+| V2 | 只能记住一个 offset | 支持多个快照 | Snapshot 对象 + HashMap |
+| V3 | 内存占用大（存储完整值） | 增量存储 | Delta 机制 |
+| V4 | 内存泄漏（强引用） | 自动 GC | WeakReference + scrub |
+| V5 | 删除快照导致查询错误 | 合并 Delta | Snapshot 双向链表 + mergeFrom |
+
+### Kafka 的最终设计
+
+**核心组件：**
+
+1. **SnapshotRegistry**
+   - 管理所有 Snapshot
+   - Snapshot 双向链表（按 epoch 排序）
+   - HashMap<Long, Snapshot> 快速查找
+   - List<WeakReference<Revertable>> 自动清理
+
+2. **Snapshot**
+   - IdentityHashMap<Revertable, Delta> 存储 Delta
+   - 双向链表（prev/next 指针）
+   - mergeFrom() 合并 Delta
+   - erase() 从链表移除
+
+3. **Revertable 接口**
+   - TimelineHashMap、TimelineHashSet、TimelineInteger... 都实现这个接口
+   - executeRevert() 应用 Delta 回滚
+   - reset() 恢复初始值
+
+4. **Delta**
+   - 只存储变更，不存储完整值
+   - mergeFrom() 合并多个 Delta
+   - 内存占用远小于完整快照
+
+### 为什么需要 500+ 行代码？
+
+**因为要同时满足：**
+
+- ✅ **统一管理**：一个 registry 管理所有数据结构
+- ✅ **多快照支持**：保留多个历史版本
+- ✅ **内存优化**：Delta 增量存储
+- ✅ **防内存泄漏**：WeakReference + scrub
+- ✅ **删除正确性**：Snapshot 合并
+- ✅ **高性能**：O(1) 回滚，O(log n) 快照查找
+
+**每一层设计都解决了一个具体问题，缺一不可！**
+
+### 运行完整演示
+
+```bash
+cd .claude/coordinator-learning
+javac snapshotregistry-evolution.java
+java SnapshotRegistryEvolution
+```
+
+输出将展示从 V1 到 V6 的完整演进过程，以及每个版本如何解决前一个版本的问题。
+
