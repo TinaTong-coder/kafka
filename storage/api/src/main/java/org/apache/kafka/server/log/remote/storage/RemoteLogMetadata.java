@@ -34,9 +34,23 @@ public abstract class RemoteLogMetadata {
      */
     private final long eventTimestampMs;
 
-    protected RemoteLogMetadata(int brokerId, long eventTimestampMs) {
+    /**
+     * The leader epoch of the broker (partition leader epoch) at the time this metadata is being published.
+     * This represents the current leader epoch of the partition, not the leader epochs within a segment.
+     */
+    private final int brokerLeaderEpoch;
+
+    /**
+     * The end offset of the log segment or partition. This is deterministic when the broker decides to
+     * upload/update/delete the segment or partition.
+     */
+    private final long endOffset;
+
+    protected RemoteLogMetadata(int brokerId, long eventTimestampMs, int brokerLeaderEpoch, long endOffset) {
         this.brokerId = brokerId;
         this.eventTimestampMs = eventTimestampMs;
+        this.brokerLeaderEpoch = brokerLeaderEpoch;
+        this.endOffset = endOffset;
     }
 
     /**
@@ -51,6 +65,20 @@ public abstract class RemoteLogMetadata {
      */
     public int brokerId() {
         return brokerId;
+    }
+
+    /**
+     * @return The current leader epoch of the partition when this metadata is being published.
+     */
+    public int brokerLeaderEpoch() {
+        return brokerLeaderEpoch;
+    }
+
+    /**
+     * @return The end offset of the log segment or partition.
+     */
+    public long endOffset() {
+        return endOffset;
     }
 
     /**
