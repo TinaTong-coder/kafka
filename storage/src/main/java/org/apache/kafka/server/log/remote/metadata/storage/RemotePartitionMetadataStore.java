@@ -35,6 +35,8 @@ import java.util.Iterator;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.List;
+import java.util.ArrayList;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
@@ -50,7 +52,15 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
     private Map<TopicIdPartition, RemoteLogMetadataCache> idToRemoteLogMetadataCache =
             new ConcurrentHashMap<>();
 
-    public RemotePartitionMetadataStore() {
+    public Iterator<String> listRemoteLogSegmentKeysByEndOffset(TopicIdPartition topicIdPartition, long endOffset, int maxLeaderEpoch) {
+        List<String> metadataKeys = new ArrayList<>();
+        try {
+            metadataKeys = getRemoteLogMetadataCache(topicIdPartition).listRemoteLogSegmentKeysByEndOffset(endOffset, maxLeaderEpoch);
+        } catch (RemoteResourceNotFoundException e) {
+            log.error("Failed to list all the keys those are no greater than the endOffset and maxLeadeerEpoch");
+        }
+        return metadataKeys.iterator();
+
     }
 
     @Override
