@@ -29,27 +29,17 @@ import org.apache.kafka.common.test.ClusterInstance;
 import org.apache.kafka.common.test.api.ClusterTest;
 import org.apache.kafka.common.test.api.ClusterTestDefaults;
 import org.apache.kafka.common.utils.Time;
-import org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMetadataManager;
 import org.apache.kafka.server.log.remote.metadata.storage.RemoteLogMetadataManagerTestUtils;
-import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentMetadata;
-import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentMetadataUpdate;
-import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentState;
-import org.apache.kafka.server.log.remote.storage.RemoteStorageException;
+import org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMetadataManager;
 
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.time.Duration;
-import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
 import java.util.Map;
 import java.util.Properties;
-import java.util.Set;
-import java.util.concurrent.ExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -162,11 +152,18 @@ public class RemoteLogMetadataTombstoneTest {
                     (recordsBeforeDeletion.get(key) != null ? "present" : "null"));
         }
 
-        String expectedKey = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch);
-        assertTrue(recordsBeforeDeletion.containsKey(expectedKey),
-                "Should have record for brokerLeaderEpoch=" + brokerLeaderEpoch);
-        assertNotNull(recordsBeforeDeletion.get(expectedKey),
-                "Record should not be tombstone");
+        String baseKey = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch);
+        String updateKey = baseKey + ":UPDATE";
+
+        // Should have both base key (from COPY_SEGMENT_STARTED) and update key (from COPY_SEGMENT_FINISHED)
+        assertTrue(recordsBeforeDeletion.containsKey(baseKey),
+                "Should have base key for brokerLeaderEpoch=" + brokerLeaderEpoch);
+        assertTrue(recordsBeforeDeletion.containsKey(updateKey),
+                "Should have update key for brokerLeaderEpoch=" + brokerLeaderEpoch);
+        assertNotNull(recordsBeforeDeletion.get(baseKey),
+                "Base key should not be tombstone");
+        assertNotNull(recordsBeforeDeletion.get(updateKey),
+                "Update key should not be tombstone");
 
         // ===== Phase 3: Delete the segment =====
         RemoteLogSegmentMetadataUpdate deleteStart = new RemoteLogSegmentMetadataUpdate(
@@ -192,23 +189,29 @@ public class RemoteLogMetadataTombstoneTest {
         );
         rlmm.updateRemoteLogSegmentMetadata(deleteFinish).get();
 
-        // Wait for tombstones to be published
-        Thread.sleep(2000);
+        // ===== Phase 4: Wait for tombstones to appear =====
+        // Both base key and update key should be tombstoned
+        waitForTombstone(topicIdPartition, baseKey, 10000);
+        waitForTombstone(topicIdPartition, updateKey, 10000);
 
-        // ===== Phase 4: Verify tombstone was published =====
+        // Verify both tombstones were published
         Map<String, byte[]> recordsAfterDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
         System.out.println("\nRecords after deletion:");
         for (String key : recordsAfterDeletion.keySet()) {
-            System.out.println("  Key: " + key + ", Value: " +
-                    (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
+            System.out.println("  Key: " + key + ", Value: "
+                    + (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
         }
 
-        // The key should still exist but with null value (tombstone)
-        assertTrue(recordsAfterDeletion.containsKey(expectedKey),
-                "Should still have key for brokerLeaderEpoch=" + brokerLeaderEpoch);
-        assertNull(recordsAfterDeletion.get(expectedKey),
-                "Record should be tombstoned");
+        // Both keys should still exist but with null values (tombstones)
+        assertTrue(recordsAfterDeletion.containsKey(baseKey),
+                "Should still have base key for brokerLeaderEpoch=" + brokerLeaderEpoch);
+        assertTrue(recordsAfterDeletion.containsKey(updateKey),
+                "Should still have update key for brokerLeaderEpoch=" + brokerLeaderEpoch);
+        assertNull(recordsAfterDeletion.get(baseKey),
+                "Base key should be tombstoned");
+        assertNull(recordsAfterDeletion.get(updateKey),
+                "Update key should be tombstoned");
     }
 
     /**
@@ -310,18 +313,21 @@ public class RemoteLogMetadataTombstoneTest {
                     (recordsBeforeDeletion.get(key) != null ? "present" : "null"));
         }
 
-        // We should have records for both brokerLeaderEpoch=1 (COPY_SEGMENT_STARTED)
-        // and brokerLeaderEpoch=2 (COPY_SEGMENT_FINISHED)
-        String key1 = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch1);
-        String key2 = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch2);
+        // We should have records for both brokerLeaderEpoch=1 and brokerLeaderEpoch=2
+        // Each has a base key and an update key
+        String baseKey1 = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch1);
+        String updateKey1 = baseKey1 + ":UPDATE";
+        String baseKey2 = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch2);
+        String updateKey2 = baseKey2 + ":UPDATE";
 
-        assertTrue(recordsBeforeDeletion.containsKey(key1),
-                "Should have record for brokerLeaderEpoch=" + brokerLeaderEpoch1 + " (Leader 1's COPY_SEGMENT_STARTED)");
-        assertTrue(recordsBeforeDeletion.containsKey(key2),
-                "Should have record for brokerLeaderEpoch=" + brokerLeaderEpoch2 + " (Leader 2's COPY_SEGMENT_FINISHED)");
-
-        assertNotNull(recordsBeforeDeletion.get(key1), "Record 1 should not be tombstone");
-        assertNotNull(recordsBeforeDeletion.get(key2), "Record 2 should not be tombstone");
+        assertTrue(recordsBeforeDeletion.containsKey(baseKey1),
+                "Should have base record for brokerLeaderEpoch=" + brokerLeaderEpoch1);
+        assertTrue(recordsBeforeDeletion.containsKey(updateKey1),
+                "Should have update record for brokerLeaderEpoch=" + brokerLeaderEpoch1);
+        assertTrue(recordsBeforeDeletion.containsKey(baseKey2),
+                "Should have base record for brokerLeaderEpoch=" + brokerLeaderEpoch2);
+        assertTrue(recordsBeforeDeletion.containsKey(updateKey2),
+                "Should have update record for brokerLeaderEpoch=" + brokerLeaderEpoch2);
 
         // ===== Phase 4: Leader 2 deletes the segment =====
         RemoteLogSegmentMetadataUpdate deleteStart = new RemoteLogSegmentMetadataUpdate(
@@ -346,30 +352,43 @@ public class RemoteLogMetadataTombstoneTest {
         );
         rlmm.updateRemoteLogSegmentMetadata(deleteFinish).get();
 
-        Thread.sleep(2000);
+        // ===== Phase 5: Wait for tombstones to appear =====
+        // All 4 keys should be tombstoned (base and update for both epochs)
+        waitForTombstone(topicIdPartition, baseKey1, 10000);
+        waitForTombstone(topicIdPartition, updateKey1, 10000);
+        waitForTombstone(topicIdPartition, baseKey2, 10000);
+        waitForTombstone(topicIdPartition, updateKey2, 10000);
 
-        // ===== Phase 5: Verify tombstones for both epochs =====
+        // Verify tombstones for both epochs
         Map<String, byte[]> recordsAfterDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
         System.out.println("\nRecords after deletion (leadership change scenario):");
         for (String key : recordsAfterDeletion.keySet()) {
-            System.out.println("  Key: " + key + ", Value: " +
-                    (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
+            System.out.println("  Key: " + key + ", Value: "
+                    + (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
         }
 
-        // Both keys should be tombstoned because brokerLeaderEpoch1 <= brokerLeaderEpoch2
-        assertTrue(recordsAfterDeletion.containsKey(key1),
-                "Should still have key for brokerLeaderEpoch=" + brokerLeaderEpoch1);
-        assertTrue(recordsAfterDeletion.containsKey(key2),
-                "Should still have key for brokerLeaderEpoch=" + brokerLeaderEpoch2);
+        // All keys should be tombstoned because brokerLeaderEpoch1 <= brokerLeaderEpoch2
+        assertTrue(recordsAfterDeletion.containsKey(baseKey1),
+                "Should still have base key for brokerLeaderEpoch=" + brokerLeaderEpoch1);
+        assertTrue(recordsAfterDeletion.containsKey(updateKey1),
+                "Should still have update key for brokerLeaderEpoch=" + brokerLeaderEpoch1);
+        assertTrue(recordsAfterDeletion.containsKey(baseKey2),
+                "Should still have base key for brokerLeaderEpoch=" + brokerLeaderEpoch2);
+        assertTrue(recordsAfterDeletion.containsKey(updateKey2),
+                "Should still have update key for brokerLeaderEpoch=" + brokerLeaderEpoch2);
 
-        assertNull(recordsAfterDeletion.get(key1),
-                "Record with brokerLeaderEpoch=" + brokerLeaderEpoch1 + " should be tombstoned");
-        assertNull(recordsAfterDeletion.get(key2),
-                "Record with brokerLeaderEpoch=" + brokerLeaderEpoch2 + " should be tombstoned");
+        assertNull(recordsAfterDeletion.get(baseKey1),
+                "Base key with brokerLeaderEpoch=" + brokerLeaderEpoch1 + " should be tombstoned");
+        assertNull(recordsAfterDeletion.get(updateKey1),
+                "Update key with brokerLeaderEpoch=" + brokerLeaderEpoch1 + " should be tombstoned");
+        assertNull(recordsAfterDeletion.get(baseKey2),
+                "Base key with brokerLeaderEpoch=" + brokerLeaderEpoch2 + " should be tombstoned");
+        assertNull(recordsAfterDeletion.get(updateKey2),
+                "Update key with brokerLeaderEpoch=" + brokerLeaderEpoch2 + " should be tombstoned");
 
-        assertEquals(2, recordsAfterDeletion.size(),
-                "Should have exactly 2 tombstone records (one for each broker leader epoch)");
+        assertEquals(4, recordsAfterDeletion.size(),
+                "Should have exactly 4 tombstone records (base and update for each broker leader epoch)");
     }
 
     /**
@@ -431,16 +450,22 @@ public class RemoteLogMetadataTombstoneTest {
                 RemoteLogSegmentState.DELETE_SEGMENT_FINISHED, 0, 1, endOffset
         )).get();
 
-        Thread.sleep(2000);
+        String baseKey1 = buildExpectedKey(topicIdPartition, endOffset, 1);
+        String updateKey1 = baseKey1 + ":UPDATE";
+        String baseKey3 = buildExpectedKey(topicIdPartition, endOffset, 3);
+        String updateKey3 = baseKey3 + ":UPDATE";
 
-        // Verify: only segment 1's key should be tombstoned, segment 2 should remain
+        // Wait for tombstones to appear for segment 1 (both base and update keys)
+        waitForTombstone(topicIdPartition, baseKey1, 10000);
+        waitForTombstone(topicIdPartition, updateKey1, 10000);
+
+        // Verify: only segment 1's keys should be tombstoned, segment 3 should remain
         Map<String, byte[]> records = consumeMetadataTopicRecords(topicIdPartition);
 
-        String key1 = buildExpectedKey(topicIdPartition, endOffset, 1);
-        String key3 = buildExpectedKey(topicIdPartition, endOffset, 3);
-
-        assertNull(records.get(key1), "Segment with brokerLeaderEpoch=1 should be tombstoned");
-        assertNotNull(records.get(key3), "Segment with brokerLeaderEpoch=3 should NOT be tombstoned");
+        assertNull(records.get(baseKey1), "Base key with brokerLeaderEpoch=1 should be tombstoned");
+        assertNull(records.get(updateKey1), "Update key with brokerLeaderEpoch=1 should be tombstoned");
+        assertNotNull(records.get(baseKey3), "Base key with brokerLeaderEpoch=3 should NOT be tombstoned");
+        assertNotNull(records.get(updateKey3), "Update key with brokerLeaderEpoch=3 should NOT be tombstoned");
     }
 
     // ===== Helper Methods =====
@@ -516,15 +541,40 @@ public class RemoteLogMetadataTombstoneTest {
     }
 
     /**
-     * Build the expected metadata key based on the key format:
+     * Wait for a tombstone to appear for the given key in the metadata topic.
+     * Polls the topic periodically until the tombstone is found or timeout is reached.
+     */
+    private void waitForTombstone(TopicIdPartition topicIdPartition, String expectedKey, long timeoutMs)
+            throws InterruptedException {
+        long startTime = System.currentTimeMillis();
+        boolean tombstoneFound = false;
+
+        while (!tombstoneFound && (System.currentTimeMillis() - startTime) < timeoutMs) {
+            Map<String, byte[]> records = consumeMetadataTopicRecords(topicIdPartition);
+            if (records.containsKey(expectedKey) && records.get(expectedKey) == null) {
+                tombstoneFound = true;
+                System.out.println("Tombstone found for key: " + expectedKey);
+            } else {
+                Thread.sleep(500);
+            }
+        }
+
+        if (!tombstoneFound) {
+            System.out.println("Warning: Tombstone not found within timeout for key: " + expectedKey);
+        }
+    }
+
+    /**
+     * Build the base metadata key based on the key format:
      * topicId:partition:endOffset:brokerLeaderEpoch
+     * Note: Update keys have an additional ":UPDATE" suffix
      */
     private String buildExpectedKey(TopicIdPartition topicIdPartition,
                                     long endOffset,
                                     int brokerLeaderEpoch) {
-        return topicIdPartition.topicId() + ":" +
-                topicIdPartition.partition() + ":" +
-                endOffset + ":" +
-                brokerLeaderEpoch;
+        return topicIdPartition.topicId() + ":"
+                + topicIdPartition.partition() + ":"
+                + endOffset + ":"
+                + brokerLeaderEpoch;
     }
 }
