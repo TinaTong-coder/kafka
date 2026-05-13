@@ -667,7 +667,7 @@ public class RemoteLogManagerTest {
         // Check we attempt to delete the segment data providing the custom metadata back.
         RemoteLogSegmentMetadataUpdate expectedMetadataUpdate = new RemoteLogSegmentMetadataUpdate(
                 remoteLogSegmentMetadataArg.getValue().remoteLogSegmentId(), time.milliseconds(),
-                Optional.of(customMetadata), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, brokerId);
+                Optional.of(customMetadata), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, brokerId, 0, remoteLogSegmentMetadataArg.getValue().endOffset());
         RemoteLogSegmentMetadata expectedDeleteMetadata = remoteLogSegmentMetadataArg.getValue().createWithUpdates(expectedMetadataUpdate);
         verify(remoteStorageManager, times(1)).deleteLogSegmentData(eq(expectedDeleteMetadata));
 
@@ -1514,7 +1514,7 @@ public class RemoteLogManagerTest {
                     Map<Integer, Long> leaderEpochs = new TreeMap<>();
                     leaderEpochs.put(leaderEpoch, offset);
                     RemoteLogSegmentMetadata metadata = new RemoteLogSegmentMetadata(segmentId,
-                            offset, offset + 100, time.milliseconds(), 0, time.milliseconds(), 1024, leaderEpochs, true);
+                            offset, offset + 100, time.milliseconds(), 0, time.milliseconds(), 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, leaderEpochs, 0);
                     return Optional.of(metadata);
                 });
 
@@ -1546,7 +1546,7 @@ public class RemoteLogManagerTest {
                         Map<Integer, Long> leaderEpochs = new TreeMap<>();
                         leaderEpochs.put(leaderEpoch, offset);
                         RemoteLogSegmentMetadata metadata = new RemoteLogSegmentMetadata(segmentId,
-                                offset, offset + 100, time.milliseconds(), 0, time.milliseconds(), 1024, leaderEpochs, true);
+                                offset, offset + 100, time.milliseconds(), 0, time.milliseconds(), 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, leaderEpochs, 0);
                         metadataOpt = Optional.of(metadata);
                     }
                     return metadataOpt;
@@ -1752,12 +1752,12 @@ public class RemoteLogManagerTest {
 
         long timestamp = time.milliseconds();
         RemoteLogSegmentMetadata metadata0 = new RemoteLogSegmentMetadata(new RemoteLogSegmentId(tpId, Uuid.randomUuid()),
-                0, 99, timestamp, brokerId, timestamp, 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, truncateAndGetLeaderEpochs(epochEntries, 0L, 99L));
+                0, 99, timestamp, brokerId, timestamp, 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, truncateAndGetLeaderEpochs(epochEntries, 0L, 99L), 0);
         RemoteLogSegmentMetadata metadata1 = new RemoteLogSegmentMetadata(new RemoteLogSegmentId(tpId, Uuid.randomUuid()),
-                100, 199, timestamp + 1, brokerId, timestamp + 1, 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, truncateAndGetLeaderEpochs(epochEntries, 100L, 199L));
+                100, 199, timestamp + 1, brokerId, timestamp + 1, 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_FINISHED, truncateAndGetLeaderEpochs(epochEntries, 100L, 199L), 0);
         // Note that the metadata2 is in COPY_SEGMENT_STARTED state
         RemoteLogSegmentMetadata metadata2 = new RemoteLogSegmentMetadata(new RemoteLogSegmentId(tpId, Uuid.randomUuid()),
-                100, 299, timestamp + 2, brokerId, timestamp + 2, 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_STARTED, truncateAndGetLeaderEpochs(epochEntries, 200L, 299L));
+                100, 299, timestamp + 2, brokerId, timestamp + 2, 1024, Optional.empty(), RemoteLogSegmentState.COPY_SEGMENT_STARTED, truncateAndGetLeaderEpochs(epochEntries, 200L, 299L), 0);
 
         when(remoteLogMetadataManager.listRemoteLogSegments(eq(tpId), anyInt()))
             .thenAnswer(ans -> {
@@ -1904,7 +1904,7 @@ public class RemoteLogManagerTest {
                 100000L,
                 1000,
                 Optional.empty(),
-                RemoteLogSegmentState.COPY_SEGMENT_FINISHED, segmentEpochs);
+                RemoteLogSegmentState.COPY_SEGMENT_FINISHED, segmentEpochs, 0);
     }
 
     @Test
@@ -2487,9 +2487,9 @@ public class RemoteLogManagerTest {
         int segmentSize = 1024;
         List<RemoteLogSegmentMetadata> segmentMetadataList = List.of(
                 new RemoteLogSegmentMetadata(new RemoteLogSegmentId(leaderTopicIdPartition, Uuid.randomUuid()),
-                        500, 539, timestamp, brokerId, timestamp, segmentSize, truncateAndGetLeaderEpochs(epochEntries, 500L, 539L)),
+                        500, 539, timestamp, brokerId, timestamp, segmentSize, truncateAndGetLeaderEpochs(epochEntries, 500L, 539L), 0),
                 new RemoteLogSegmentMetadata(new RemoteLogSegmentId(leaderTopicIdPartition, Uuid.randomUuid()),
-                        540, 700, timestamp, brokerId, timestamp, segmentSize, truncateAndGetLeaderEpochs(epochEntries, 540L, 700L))
+                        540, 700, timestamp, brokerId, timestamp, segmentSize, truncateAndGetLeaderEpochs(epochEntries, 540L, 700L), 0)
                 );
         when(remoteLogMetadataManager.listRemoteLogSegments(eq(leaderTopicIdPartition), anyInt()))
                 .thenAnswer(invocation -> {
@@ -2830,7 +2830,7 @@ public class RemoteLogManagerTest {
         RemoteLogSegmentMetadata metadata2 = new RemoteLogSegmentMetadata(new RemoteLogSegmentId(leaderTopicIdPartition, Uuid.randomUuid()),
                 metadata1.startOffset(), metadata1.endOffset() + 5, metadata1.maxTimestampMs(),
                 metadata1.brokerId() + 1, metadata1.eventTimestampMs(), metadata1.segmentSizeInBytes() + 128,
-                metadata1.customMetadata(), metadata1.state(), metadata1.segmentLeaderEpochs());
+                metadata1.customMetadata(), metadata1.state(), metadata1.segmentLeaderEpochs(), metadata1.brokerLeaderEpoch());
 
         // When there are overlapping/duplicate segments, the RemoteLogMetadataManager#listRemoteLogSegments
         // returns the segments in order of (valid ++ unreferenced) segments:
@@ -3446,7 +3446,8 @@ public class RemoteLogManagerTest {
                     segmentSize,
                     Optional.empty(),
                     state,
-                    segmentLeaderEpochs
+                    segmentLeaderEpochs,
+                    0
             );
             segmentMetadataList.add(metadata);
         }
@@ -3469,7 +3470,8 @@ public class RemoteLogManagerTest {
                 segmentSize,
                 Optional.empty(),
                 state,
-                truncateAndGetLeaderEpochs(epochEntries, startOffset, endOffset));
+                truncateAndGetLeaderEpochs(epochEntries, startOffset, endOffset),
+                0);
     }
 
     private Map<Integer, Long> truncateAndGetLeaderEpochs(List<EpochEntry> entries,
