@@ -471,12 +471,10 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
                                    Map<String, Uuid> topicIds) {
         LOGGER.debug("Received leadership changes for leaders: {} and followers: {}", partitionsBecomeLeader, partitionsBecomeFollower);
 
-        // Capture leader epochs for leader partitions
-        Map<TopicIdPartition, Integer> leaderEpochMap = new HashMap<>();
         Map<TopicIdPartition, Boolean> leaderPartitions = filterPartitions(partitionsBecomeLeader)
                 .peek(p -> {
                     TopicIdPartition tip = new TopicIdPartition(topicIds.get(p.topicPartition().topic()), p.topicPartition());
-                    leaderEpochMap.put(tip, p.getLeaderEpoch());
+                    topicIdPartitionToLeaderEpochMap.put(tip, p.getLeaderEpoch());
                 })
                 .collect(Collectors.toMap(p -> new TopicIdPartition(topicIds.get(p.topicPartition().topic()), p.topicPartition()),
                         p -> p.unifiedLog().isPresent() ? p.unifiedLog().get().config().remoteLogCopyDisable() : false));
