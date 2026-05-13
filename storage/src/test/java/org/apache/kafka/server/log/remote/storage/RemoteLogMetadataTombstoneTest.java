@@ -80,7 +80,6 @@ public class RemoteLogMetadataTombstoneTest {
         if (remoteLogMetadataManager == null) {
             remoteLogMetadataManager = RemoteLogMetadataManagerTestUtils.builder()
                     .bootstrapServers(clusterInstance.bootstrapServers())
-                    .startConsumerThread(true)
                     .build();
         }
         return remoteLogMetadataManager;
@@ -473,8 +472,10 @@ public class RemoteLogMetadataTombstoneTest {
         props.put(ConsumerConfig.EXCLUDE_INTERNAL_TOPICS_CONFIG, "false");  // Allow consuming internal topics
 
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
-            // Use the RLMM's own method to calculate the correct metadata partition
-            int metadataPartition = remoteLogMetadataManager.metadataPartition(topicIdPartition);
+            // Calculate metadata partition using the partitioner
+            // The metadata topic has 3 partitions by default (see RemoteLogMetadataManagerTestUtils.METADATA_TOPIC_PARTITIONS_COUNT)
+            // Use the same hashing logic as RemoteLogMetadataTopicPartitioner
+            int metadataPartition = Math.abs(topicIdPartition.hashCode()) % 3;
             TopicPartition metadataTopicPartition = new TopicPartition(METADATA_TOPIC, metadataPartition);
 
             consumer.assign(Collections.singletonList(metadataTopicPartition));
