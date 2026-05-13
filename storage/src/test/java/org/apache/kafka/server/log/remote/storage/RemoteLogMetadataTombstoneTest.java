@@ -77,12 +77,12 @@ public class RemoteLogMetadataTombstoneTest {
     }
 
     private TopicBasedRemoteLogMetadataManager createManager() {
-//        if (remoteLogMetadataManager == null) {
-//            remoteLogMetadataManager = RemoteLogMetadataManagerTestUtils.builder()
-//                    .bootstrapServers(clusterInstance.bootstrapServers())
-//                    .startConsumerThread(true)
-//                    .build();
-//        }
+        if (remoteLogMetadataManager == null) {
+            remoteLogMetadataManager = RemoteLogMetadataManagerTestUtils.builder()
+                    .bootstrapServers(clusterInstance.bootstrapServers())
+                    .startConsumerThread(true)
+                    .build();
+        }
         return remoteLogMetadataManager;
     }
 
@@ -474,8 +474,7 @@ public class RemoteLogMetadataTombstoneTest {
 
         try (KafkaConsumer<String, byte[]> consumer = new KafkaConsumer<>(props)) {
             // Use the RLMM's own method to calculate the correct metadata partition
-//            int metadataPartition = remoteLogMetadataManager.metadataPartition(topicIdPartition);
-            int metadataPartition = 0;
+            int metadataPartition = remoteLogMetadataManager.metadataPartition(topicIdPartition);
             TopicPartition metadataTopicPartition = new TopicPartition(METADATA_TOPIC, metadataPartition);
 
             consumer.assign(Collections.singletonList(metadataTopicPartition));
