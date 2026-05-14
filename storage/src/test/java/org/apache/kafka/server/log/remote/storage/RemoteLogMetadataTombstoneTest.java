@@ -33,6 +33,8 @@ import org.apache.kafka.server.log.remote.metadata.storage.RemoteLogMetadataMana
 import org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMetadataManager;
 
 import org.junit.jupiter.api.AfterEach;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.time.Duration;
@@ -57,6 +59,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @ClusterTestDefaults(brokers = 3)
 public class RemoteLogMetadataTombstoneTest {
+    private static final Logger log = LoggerFactory.getLogger(RemoteLogMetadataTombstoneTest.class);
     private static final int SEG_SIZE = 1048576;
     private static final String METADATA_TOPIC = "__remote_log_metadata";
 
@@ -145,9 +148,9 @@ public class RemoteLogMetadataTombstoneTest {
         // ===== Phase 2: Verify metadata topic has the record =====
         Map<String, byte[]> recordsBeforeDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
-        System.out.println("Records before deletion:");
+        log.info("Records before deletion:");
         for (String key : recordsBeforeDeletion.keySet()) {
-            System.out.println("  Key: " + key + ", Value: " +
+            log.info("  Key: {}, Value: {}", key,
                     (recordsBeforeDeletion.get(key) != null ? "present" : "null"));
         }
 
@@ -196,10 +199,10 @@ public class RemoteLogMetadataTombstoneTest {
         // Verify both tombstones were published
         Map<String, byte[]> recordsAfterDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
-        System.out.println("\nRecords after deletion:");
+        log.info("Records after deletion:");
         for (String key : recordsAfterDeletion.keySet()) {
-            System.out.println("  Key: " + key + ", Value: "
-                    + (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
+            log.info("  Key: {}, Value: {}", key,
+                    (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
         }
 
         // Both keys should still exist but with null values (tombstones)
@@ -301,9 +304,9 @@ public class RemoteLogMetadataTombstoneTest {
         // ===== Phase 3: Verify metadata topic has records for both epochs =====
         Map<String, byte[]> recordsBeforeDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
-        System.out.println("Records before deletion (leadership change scenario):");
+        log.info("Records before deletion (leadership change scenario):");
         for (String key : recordsBeforeDeletion.keySet()) {
-            System.out.println("  Key: " + key + ", Value: " +
+            log.info("  Key: {}, Value: {}", key,
                     (recordsBeforeDeletion.get(key) != null ? "present" : "null"));
         }
 
@@ -348,10 +351,10 @@ public class RemoteLogMetadataTombstoneTest {
         // Verify tombstones for both epochs
         Map<String, byte[]> recordsAfterDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
-        System.out.println("\nRecords after deletion (leadership change scenario):");
+        log.info("Records after deletion (leadership change scenario):");
         for (String key : recordsAfterDeletion.keySet()) {
-            System.out.println("  Key: " + key + ", Value: "
-                    + (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
+            log.info("  Key: {}, Value: {}", key,
+                    (recordsAfterDeletion.get(key) != null ? "present" : "TOMBSTONE"));
         }
 
         // All keys should be tombstoned because brokerLeaderEpoch1 <= brokerLeaderEpoch2
@@ -525,14 +528,14 @@ public class RemoteLogMetadataTombstoneTest {
             Map<String, byte[]> records = consumeMetadataTopicRecords(topicIdPartition);
             if (records.containsKey(expectedKey) && records.get(expectedKey) == null) {
                 tombstoneFound = true;
-                System.out.println("Tombstone found for key: " + expectedKey);
+                log.debug("Tombstone found for key: {}", expectedKey);
             } else {
                 Thread.sleep(500);
             }
         }
 
         if (!tombstoneFound) {
-            System.out.println("Warning: Tombstone not found within timeout for key: " + expectedKey);
+            log.warn("Tombstone not found within timeout for key: {}", expectedKey);
         }
     }
 

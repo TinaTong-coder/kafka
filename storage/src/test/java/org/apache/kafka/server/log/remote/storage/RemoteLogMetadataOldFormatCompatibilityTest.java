@@ -38,6 +38,8 @@ import org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMe
 import org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde;
 
 import org.junit.jupiter.api.AfterEach;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -68,6 +70,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  */
 @ClusterTestDefaults(brokers = 3)
 public class RemoteLogMetadataOldFormatCompatibilityTest {
+    private static final Logger log = LoggerFactory.getLogger(RemoteLogMetadataOldFormatCompatibilityTest.class);
     private static final String METADATA_TOPIC = "__remote_log_metadata";
     private static final int SEG_SIZE = 1048576;
 
@@ -113,7 +116,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         );
 
         // Step 1: Initialize RLMM with delete policy (simulating old cluster)
-        System.out.println("Step 1: Initializing RLMM with delete policy...");
+        log.info("Step 1: Initializing RLMM with delete policy...");
 
         // First create the topic with delete policy by modifying the config
         TopicBasedRemoteLogMetadataManager rlmm = createManager();
@@ -122,11 +125,11 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 Collections.emptySet()
         );
         waitForInitialization(rlmm, topicIdPartition);
-        System.out.println("RLMM initialized and metadata topic created.");
+        log.info("RLMM initialized and metadata topic created.");
 
         // Change topic to delete policy to allow null keys
         changeTopicToDeletePolicy();
-        System.out.println("Changed metadata topic to delete cleanup policy.");
+        log.info("Changed metadata topic to delete cleanup policy.");
 
         // Close RLMM before writing old format messages
         rlmm.close();
@@ -134,7 +137,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         Thread.sleep(2000);
 
         // Step 2: Write old format message (null key) - simulating old code
-        System.out.println("Step 2: Writing old format message (null key)...");
+        log.info("Step 2: Writing old format message (null key)...");
         RemoteLogSegmentId oldSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
         long oldEndOffset = 500L;
         int brokerLeaderEpoch = 1;
@@ -152,22 +155,22 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         );
 
         writeMessageWithNullKey(topicIdPartition, oldMetadata);
-        System.out.println("Old format message written successfully.");
+        log.info("Old format message written successfully.");
 
         Thread.sleep(2000);
 
         // Step 3: Re-initialize RLMM (simulating upgrade to new code)
-        System.out.println("Step 3: Upgrading to new code (re-initializing RLMM)...");
+        log.info("Step 3: Upgrading to new code (re-initializing RLMM)...");
         final TopicBasedRemoteLogMetadataManager rlmm2 = createManager();
         rlmm2.onPartitionLeadershipChanges(
                 Collections.singleton(topicIdPartition),
                 Collections.emptySet()
         );
         waitForInitialization(rlmm2, topicIdPartition);
-        System.out.println("RLMM re-initialized with new code.");
+        log.info("RLMM re-initialized with new code.");
 
         // Step 4: Update old segment to verify it was read correctly
-        System.out.println("Step 4: Updating old segment to COPY_SEGMENT_FINISHED...");
+        log.info("Step 4: Updating old segment to COPY_SEGMENT_FINISHED...");
         RemoteLogSegmentMetadataUpdate oldUpdate = new RemoteLogSegmentMetadataUpdate(
                 oldSegmentId,
                 time.milliseconds(),
@@ -187,10 +190,10 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
         assertTrue(retrievedOld.isPresent(), "Should be able to read old segment");
         assertEquals(oldSegmentId, retrievedOld.get().remoteLogSegmentId());
-        System.out.println("✅ Old segment processed successfully!");
+        log.info("✅ Old segment processed successfully!");
 
         // Step 5: Write new format message (with key) - new code
-        System.out.println("Step 5: Writing new format message (with key)...");
+        log.info("Step 5: Writing new format message (with key)...");
         RemoteLogSegmentId newSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
         long newEndOffset = 1500L;
 
@@ -223,7 +226,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         Thread.sleep(1000);
 
         // Step 6: Verify both old and new segments coexist
-        System.out.println("Step 6: Verifying both old and new segments coexist...");
+        log.info("Step 6: Verifying both old and new segments coexist...");
         Optional<RemoteLogSegmentMetadata> retrievedNew =
                 rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 1000);
         assertTrue(retrievedNew.isPresent(), "Should be able to read new segment");
@@ -233,15 +236,15 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         assertTrue(retrievedOld.isPresent(), "Old segment should still be accessible");
         assertEquals(oldSegmentId, retrievedOld.get().remoteLogSegmentId());
 
-        System.out.println("✅ Both old and new segments coexist successfully!");
+        log.info("✅ Both old and new segments coexist successfully!");
 
         // Step 7: Change topic to compacted (simulating after retention period)
-        System.out.println("Step 7: Changing topic to compacted policy...");
+        log.info("Step 7: Changing topic to compacted policy...");
         changeTopicToCompactedPolicy();
-        System.out.println("✅ Topic changed to compacted policy.");
+        log.info("✅ Topic changed to compacted policy.");
 
         // Step 8: Verify new segments can still be written with compacted policy
-        System.out.println("Step 8: Writing another new segment with compacted policy...");
+        log.info("Step 8: Writing another new segment with compacted policy...");
         RemoteLogSegmentId thirdSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
         long thirdEndOffset = 2500L;
 
@@ -260,7 +263,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(thirdMetadata).get(),
                 "Should be able to add new segment with compacted policy");
 
-        System.out.println("✅ Test passed! Upgrade scenario with mixed message formats works correctly.");
+        log.info("✅ Test passed! Upgrade scenario with mixed message formats works correctly.");
     }
 
     private void writeMessageWithNullKey(TopicIdPartition topicIdPartition,
