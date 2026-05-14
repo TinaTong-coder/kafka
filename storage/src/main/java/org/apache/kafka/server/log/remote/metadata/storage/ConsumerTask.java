@@ -197,6 +197,7 @@ class ConsumerTask implements Runnable, Closeable {
         maybeFetchStartAndEndOffsets();
         boolean isAllInitialized = true;
         for (final UserTopicIdPartition utp : assignedUserTopicIdPartitions.values()) {
+            log.info("tosavana The user-topic-partition {}", utp);
             if (utp.isAssigned && !utp.isInitialized) {
                 final Integer metadataPartition = utp.metadataPartition;
                 final StartAndEndOffsetHolder holder = offsetHolderByMetadataPartition.get(toRemoteLogPartition(metadataPartition));
@@ -380,7 +381,6 @@ class ConsumerTask implements Runnable, Closeable {
                     .stream()
                     .collect(Collectors.toMap(Map.Entry::getKey,
                         e -> new StartAndEndOffsetHolder(startOffsets.get(e.getKey()), e.getValue())));
-
             }
             hasLastOffsetsFetchFailed = false;
         } catch (final RetriableException ex) {

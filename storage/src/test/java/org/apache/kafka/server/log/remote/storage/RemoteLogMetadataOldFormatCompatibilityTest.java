@@ -33,6 +33,7 @@ import org.apache.kafka.common.test.api.ClusterTest;
 import org.apache.kafka.common.test.api.ClusterTestDefaults;
 import org.apache.kafka.common.utils.Time;
 import org.apache.kafka.server.log.remote.metadata.storage.RemoteLogMetadataManagerTestUtils;
+import org.apache.kafka.server.log.remote.metadata.storage.RemoteLogMetadataTopicPartitioner;
 import org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMetadataManager;
 import org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde;
 
@@ -274,7 +275,8 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
             RemoteLogMetadataSerde serde = new RemoteLogMetadataSerde();
             byte[] value = serde.serialize(metadata);
 
-            int metadataPartition = Math.abs(topicIdPartition.hashCode()) % 3;
+            RemoteLogMetadataTopicPartitioner partitioner = new RemoteLogMetadataTopicPartitioner(3);
+            int metadataPartition = partitioner.metadataPartition(topicIdPartition);
 
             ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(
                     METADATA_TOPIC,
