@@ -151,7 +151,7 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
      * @return CompletableFuture that completes when DELETE_SEGMENT_FINISHED is successfully published
      */
     private CompletableFuture<Void> tombstoneSegmentMetadata(TopicIdPartition topicIdPartition, RemoteLogSegmentMetadataUpdate segmentMetadataUpdate)
-            throws RemoteStorageException{
+            throws RemoteStorageException {
         Objects.requireNonNull(segmentMetadataUpdate, "segmentMetadataUpdate can not be null");
 
         lock.readLock().lock();
