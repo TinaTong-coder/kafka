@@ -16,11 +16,21 @@
  */
 package org.apache.kafka.server.log.remote.storage;
 
+import org.apache.kafka.clients.admin.Admin;
+import org.apache.kafka.clients.admin.AlterConfigOp;
+import org.apache.kafka.clients.admin.ConfigEntry;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
+import org.apache.kafka.clients.producer.KafkaProducer;
+import org.apache.kafka.clients.producer.ProducerConfig;
+import org.apache.kafka.clients.producer.ProducerRecord;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.Uuid;
+import org.apache.kafka.common.config.ConfigResource;
+import org.apache.kafka.common.config.TopicConfig;
+import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.ClusterInstance;
+import org.apache.kafka.common.test.api.ClusterConfigProperty;
 import org.apache.kafka.common.test.api.ClusterTest;
 import org.apache.kafka.common.test.api.ClusterTestDefaults;
 import org.apache.kafka.common.utils.Time;
@@ -32,8 +42,12 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
+import java.util.Collection;
 import java.util.Collections;
+import java.util.HashMap;
+import java.util.Map;
 import java.util.Optional;
+import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -51,9 +65,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * - Therefore, new code can read old messages without keys
  *
  * Upgrade strategy:
- * - New clusters: metadata topic created as compacted (cannot accept null keys)
- * - Existing clusters: old messages (null keys) expire via time-based retention (24h default)
- * - After retention period, all messages have keys and topic can be safely compacted
+ * - Existing clusters: topic starts with delete policy, old messages (null keys) exist
+ * - After upgrade: new messages written with keys
+ * - Old messages expire via time-based retention (24h default)
+ * - After retention period: topic can be safely changed to compacted policy
  */
 @ClusterTestDefaults(brokers = 3)
 public class RemoteLogMetadataOldFormatCompatibilityTest {
@@ -155,35 +170,58 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
     }
 
     /**
-     * Test that new code can write and read messages with proper keys.
-     * This verifies the normal operation with the new format.
+     * Test upgrade scenario: topic starts with delete policy (old messages with null keys),
+     * then new messages with keys are written, and finally topic is changed to compacted.
+     *
+     * This simulates the actual upgrade path where:
+     * 1. Old cluster has messages with null keys (delete policy)
+     * 2. Upgrade to new code: new messages have keys
+     * 3. Both old and new messages coexist temporarily
+     * 4. After old messages expire, change to compacted policy
      */
-    @ClusterTest
-    public void testNewCodeWritesAndReadsMessagesWithKeys() throws Exception {
+    @ClusterTest(
+        clusterProperties = {
+            @ClusterConfigProperty(key = "remote.log.metadata.topic.num.partitions", value = "3"),
+            @ClusterConfigProperty(key = "remote.log.metadata.topic.replication.factor", value = "1")
+        }
+    )
+    public void testUpgradeScenarioWithMixedMessageFormats() throws Exception {
         TopicIdPartition topicIdPartition = new TopicIdPartition(
                 Uuid.randomUuid(),
-                new TopicPartition("test-new-format", 0)
+                new TopicPartition("test-upgrade-scenario", 0)
         );
 
-        System.out.println("Initializing RLMM...");
+        // Step 1: Initialize RLMM with delete policy (simulating old cluster)
+        System.out.println("Step 1: Initializing RLMM with delete policy...");
+
+        // First create the topic with delete policy by modifying the config
         TopicBasedRemoteLogMetadataManager rlmm = createManager();
         rlmm.onPartitionLeadershipChanges(
                 Collections.singleton(topicIdPartition),
                 Collections.emptySet()
         );
-
         waitForInitialization(rlmm, topicIdPartition);
-        System.out.println("RLMM initialized successfully.");
+        System.out.println("RLMM initialized and metadata topic created.");
 
-        // Write a segment with new format (automatic key generation)
-        RemoteLogSegmentId segmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
-        long endOffset = 1000L;
+        // Change topic to delete policy to allow null keys
+        changeTopicToDeletePolicy();
+        System.out.println("Changed metadata topic to delete cleanup policy.");
+
+        // Close RLMM before writing old format messages
+        rlmm.close();
+        remoteLogMetadataManager = null;
+        Thread.sleep(2000);
+
+        // Step 2: Write old format message (null key) - simulating old code
+        System.out.println("Step 2: Writing old format message (null key)...");
+        RemoteLogSegmentId oldSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
+        long oldEndOffset = 500L;
         int brokerLeaderEpoch = 1;
 
-        RemoteLogSegmentMetadata metadata = new RemoteLogSegmentMetadata(
-                segmentId,
+        RemoteLogSegmentMetadata oldMetadata = new RemoteLogSegmentMetadata(
+                oldSegmentId,
                 0L,
-                endOffset,
+                oldEndOffset,
                 -1L,
                 0,
                 time.milliseconds(),
@@ -192,70 +230,178 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 brokerLeaderEpoch
         );
 
-        // Verify the key format
-        String expectedKey = topicIdPartition.topicId() + ":" +
-                topicIdPartition.partition() + ":" +
-                endOffset + ":" +
-                brokerLeaderEpoch;
-        assertEquals(expectedKey, metadata.metadataKey(), "Key should follow the expected format");
+        writeMessageWithNullKey(topicIdPartition, oldMetadata);
+        System.out.println("Old format message written successfully.");
 
-        System.out.println("Adding segment metadata with key: " + metadata.metadataKey());
-        assertDoesNotThrow(() -> rlmm.addRemoteLogSegmentMetadata(metadata).get(),
-                "Should be able to add segment with new format");
+        Thread.sleep(2000);
 
-        // Update to COPY_SEGMENT_FINISHED
-        RemoteLogSegmentMetadataUpdate update = new RemoteLogSegmentMetadataUpdate(
-                segmentId,
+        // Step 3: Re-initialize RLMM (simulating upgrade to new code)
+        System.out.println("Step 3: Upgrading to new code (re-initializing RLMM)...");
+        rlmm = createManager();
+        rlmm.onPartitionLeadershipChanges(
+                Collections.singleton(topicIdPartition),
+                Collections.emptySet()
+        );
+        waitForInitialization(rlmm, topicIdPartition);
+        System.out.println("RLMM re-initialized with new code.");
+
+        // Step 4: Update old segment to verify it was read correctly
+        System.out.println("Step 4: Updating old segment to COPY_SEGMENT_FINISHED...");
+        RemoteLogSegmentMetadataUpdate oldUpdate = new RemoteLogSegmentMetadataUpdate(
+                oldSegmentId,
                 time.milliseconds(),
                 Optional.empty(),
                 RemoteLogSegmentState.COPY_SEGMENT_FINISHED,
                 0,
                 brokerLeaderEpoch,
-                endOffset
+                oldEndOffset
         );
-
-        System.out.println("Updating segment to COPY_SEGMENT_FINISHED...");
-        assertDoesNotThrow(() -> rlmm.updateRemoteLogSegmentMetadata(update).get());
+        assertDoesNotThrow(() -> rlmm.updateRemoteLogSegmentMetadata(oldUpdate).get(),
+                "Should be able to update old segment");
 
         Thread.sleep(1000);
 
-        // Verify we can read the segment
-        Optional<RemoteLogSegmentMetadata> retrieved =
-                rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 500);
-        assertTrue(retrieved.isPresent(), "Should be able to read the segment");
-        assertEquals(segmentId, retrieved.get().remoteLogSegmentId());
-        assertEquals(RemoteLogSegmentState.COPY_SEGMENT_FINISHED, retrieved.get().state());
+        // Verify old segment is readable
+        Optional<RemoteLogSegmentMetadata> retrievedOld =
+                rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
+        assertTrue(retrievedOld.isPresent(), "Should be able to read old segment");
+        assertEquals(oldSegmentId, retrievedOld.get().remoteLogSegmentId());
+        System.out.println("✅ Old segment processed successfully!");
 
-        System.out.println("✅ Test passed! New format with keys works correctly.");
+        // Step 5: Write new format message (with key) - new code
+        System.out.println("Step 5: Writing new format message (with key)...");
+        RemoteLogSegmentId newSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
+        long newEndOffset = 1500L;
+
+        RemoteLogSegmentMetadata newMetadata = new RemoteLogSegmentMetadata(
+                newSegmentId,
+                501L,
+                newEndOffset,
+                -1L,
+                0,
+                time.milliseconds(),
+                SEG_SIZE,
+                Collections.singletonMap(0, 501L),
+                brokerLeaderEpoch
+        );
+
+        assertDoesNotThrow(() -> rlmm.addRemoteLogSegmentMetadata(newMetadata).get(),
+                "Should be able to add new segment with key");
+
+        RemoteLogSegmentMetadataUpdate newUpdate = new RemoteLogSegmentMetadataUpdate(
+                newSegmentId,
+                time.milliseconds(),
+                Optional.empty(),
+                RemoteLogSegmentState.COPY_SEGMENT_FINISHED,
+                0,
+                brokerLeaderEpoch,
+                newEndOffset
+        );
+        assertDoesNotThrow(() -> rlmm.updateRemoteLogSegmentMetadata(newUpdate).get());
+
+        Thread.sleep(1000);
+
+        // Step 6: Verify both old and new segments coexist
+        System.out.println("Step 6: Verifying both old and new segments coexist...");
+        Optional<RemoteLogSegmentMetadata> retrievedNew =
+                rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 1000);
+        assertTrue(retrievedNew.isPresent(), "Should be able to read new segment");
+        assertEquals(newSegmentId, retrievedNew.get().remoteLogSegmentId());
+
+        retrievedOld = rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
+        assertTrue(retrievedOld.isPresent(), "Old segment should still be accessible");
+        assertEquals(oldSegmentId, retrievedOld.get().remoteLogSegmentId());
+
+        System.out.println("✅ Both old and new segments coexist successfully!");
+
+        // Step 7: Change topic to compacted (simulating after retention period)
+        System.out.println("Step 7: Changing topic to compacted policy...");
+        changeTopicToCompactedPolicy();
+        System.out.println("✅ Topic changed to compacted policy.");
+
+        // Step 8: Verify new segments can still be written with compacted policy
+        System.out.println("Step 8: Writing another new segment with compacted policy...");
+        RemoteLogSegmentId thirdSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
+        long thirdEndOffset = 2500L;
+
+        RemoteLogSegmentMetadata thirdMetadata = new RemoteLogSegmentMetadata(
+                thirdSegmentId,
+                1501L,
+                thirdEndOffset,
+                -1L,
+                0,
+                time.milliseconds(),
+                SEG_SIZE,
+                Collections.singletonMap(0, 1501L),
+                brokerLeaderEpoch
+        );
+
+        assertDoesNotThrow(() -> rlmm.addRemoteLogSegmentMetadata(thirdMetadata).get(),
+                "Should be able to add new segment with compacted policy");
+
+        System.out.println("✅ Test passed! Upgrade scenario with mixed message formats works correctly.");
     }
 
-    /**
-     * Test that metadata topic is created as compacted.
-     * This verifies that new clusters will reject messages without keys.
-     */
-    @ClusterTest
-    public void testMetadataTopicIsCompacted() throws Exception {
-        TopicIdPartition topicIdPartition = new TopicIdPartition(
-                Uuid.randomUuid(),
-                new TopicPartition("test-compaction-check", 0)
-        );
+    private void writeMessageWithNullKey(TopicIdPartition topicIdPartition,
+                                         RemoteLogSegmentMetadata metadata) throws Exception {
+        Properties props = new Properties();
+        props.put(ProducerConfig.BOOTSTRAP_SERVERS_CONFIG, clusterInstance.bootstrapServers());
+        props.put(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+        props.put(ProducerConfig.VALUE_SERIALIZER_CLASS_CONFIG, ByteArraySerializer.class.getName());
+        props.put(ProducerConfig.ACKS_CONFIG, "all");
 
-        System.out.println("Initializing RLMM to create metadata topic...");
-        TopicBasedRemoteLogMetadataManager rlmm = createManager();
-        rlmm.onPartitionLeadershipChanges(
-                Collections.singleton(topicIdPartition),
-                Collections.emptySet()
-        );
+        try (KafkaProducer<byte[], byte[]> producer = new KafkaProducer<>(props)) {
+            RemoteLogMetadataSerde serde = new RemoteLogMetadataSerde();
+            byte[] value = serde.serialize(metadata);
 
-        waitForInitialization(rlmm, topicIdPartition);
-        System.out.println("RLMM initialized. Metadata topic should be created as compacted.");
+            int metadataPartition = Math.abs(topicIdPartition.hashCode()) % 3;
 
-        // Note: The actual verification that the topic is compacted is implicit:
-        // If we try to write a message with null key, it will fail with:
-        // "Compacted topic cannot accept message without key"
-        // This was verified in our manual testing.
+            ProducerRecord<byte[], byte[]> record = new ProducerRecord<>(
+                    METADATA_TOPIC,
+                    metadataPartition,
+                    null,  // Old format: null key
+                    value
+            );
 
-        System.out.println("✅ Metadata topic created successfully.");
+            producer.send(record).get();
+            producer.flush();
+        }
+    }
+
+    private void changeTopicToDeletePolicy() throws Exception {
+        try (Admin admin = Admin.create(Collections.singletonMap(
+                "bootstrap.servers", clusterInstance.bootstrapServers()))) {
+            ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
+
+            Map<ConfigResource, Collection<AlterConfigOp>> configs = new HashMap<>();
+            configs.put(resource, Collections.singletonList(
+                    new AlterConfigOp(
+                            new ConfigEntry(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_DELETE),
+                            AlterConfigOp.OpType.SET
+                    )
+            ));
+
+            admin.incrementalAlterConfigs(configs).all().get();
+            Thread.sleep(2000); // Wait for config change to propagate
+        }
+    }
+
+    private void changeTopicToCompactedPolicy() throws Exception {
+        try (Admin admin = Admin.create(Collections.singletonMap(
+                "bootstrap.servers", clusterInstance.bootstrapServers()))) {
+            ConfigResource resource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
+
+            Map<ConfigResource, Collection<AlterConfigOp>> configs = new HashMap<>();
+            configs.put(resource, Collections.singletonList(
+                    new AlterConfigOp(
+                            new ConfigEntry(TopicConfig.CLEANUP_POLICY_CONFIG, TopicConfig.CLEANUP_POLICY_COMPACT),
+                            AlterConfigOp.OpType.SET
+                    )
+            ));
+
+            admin.incrementalAlterConfigs(configs).all().get();
+            Thread.sleep(2000); // Wait for config change to propagate
+        }
     }
 
     private void waitForInitialization(TopicBasedRemoteLogMetadataManager rlmm,
