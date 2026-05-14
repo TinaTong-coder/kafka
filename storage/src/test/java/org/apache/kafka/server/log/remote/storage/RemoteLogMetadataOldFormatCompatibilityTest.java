@@ -30,7 +30,6 @@ import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
 import org.apache.kafka.common.serialization.ByteArraySerializer;
 import org.apache.kafka.common.test.ClusterInstance;
-import org.apache.kafka.common.test.api.ClusterConfigProperty;
 import org.apache.kafka.common.test.api.ClusterTest;
 import org.apache.kafka.common.test.api.ClusterTestDefaults;
 import org.apache.kafka.common.utils.Time;
@@ -179,12 +178,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
      * 3. Both old and new messages coexist temporarily
      * 4. After old messages expire, change to compacted policy
      */
-    @ClusterTest(
-        clusterProperties = {
-            @ClusterConfigProperty(key = "remote.log.metadata.topic.num.partitions", value = "3"),
-            @ClusterConfigProperty(key = "remote.log.metadata.topic.replication.factor", value = "1")
-        }
-    )
+    @ClusterTest
     public void testUpgradeScenarioWithMixedMessageFormats() throws Exception {
         TopicIdPartition topicIdPartition = new TopicIdPartition(
                 Uuid.randomUuid(),
@@ -237,12 +231,12 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
 
         // Step 3: Re-initialize RLMM (simulating upgrade to new code)
         System.out.println("Step 3: Upgrading to new code (re-initializing RLMM)...");
-        rlmm = createManager();
-        rlmm.onPartitionLeadershipChanges(
+        final TopicBasedRemoteLogMetadataManager rlmm2 = createManager();
+        rlmm2.onPartitionLeadershipChanges(
                 Collections.singleton(topicIdPartition),
                 Collections.emptySet()
         );
-        waitForInitialization(rlmm, topicIdPartition);
+        waitForInitialization(rlmm2, topicIdPartition);
         System.out.println("RLMM re-initialized with new code.");
 
         // Step 4: Update old segment to verify it was read correctly
@@ -256,14 +250,14 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 brokerLeaderEpoch,
                 oldEndOffset
         );
-        assertDoesNotThrow(() -> rlmm.updateRemoteLogSegmentMetadata(oldUpdate).get(),
+        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(oldUpdate).get(),
                 "Should be able to update old segment");
 
         Thread.sleep(1000);
 
         // Verify old segment is readable
         Optional<RemoteLogSegmentMetadata> retrievedOld =
-                rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
+                rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
         assertTrue(retrievedOld.isPresent(), "Should be able to read old segment");
         assertEquals(oldSegmentId, retrievedOld.get().remoteLogSegmentId());
         System.out.println("✅ Old segment processed successfully!");
@@ -285,7 +279,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 brokerLeaderEpoch
         );
 
-        assertDoesNotThrow(() -> rlmm.addRemoteLogSegmentMetadata(newMetadata).get(),
+        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(newMetadata).get(),
                 "Should be able to add new segment with key");
 
         RemoteLogSegmentMetadataUpdate newUpdate = new RemoteLogSegmentMetadataUpdate(
@@ -297,18 +291,18 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 brokerLeaderEpoch,
                 newEndOffset
         );
-        assertDoesNotThrow(() -> rlmm.updateRemoteLogSegmentMetadata(newUpdate).get());
+        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(newUpdate).get());
 
         Thread.sleep(1000);
 
         // Step 6: Verify both old and new segments coexist
         System.out.println("Step 6: Verifying both old and new segments coexist...");
         Optional<RemoteLogSegmentMetadata> retrievedNew =
-                rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 1000);
+                rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 1000);
         assertTrue(retrievedNew.isPresent(), "Should be able to read new segment");
         assertEquals(newSegmentId, retrievedNew.get().remoteLogSegmentId());
 
-        retrievedOld = rlmm.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
+        retrievedOld = rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
         assertTrue(retrievedOld.isPresent(), "Old segment should still be accessible");
         assertEquals(oldSegmentId, retrievedOld.get().remoteLogSegmentId());
 
@@ -336,7 +330,7 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 brokerLeaderEpoch
         );
 
-        assertDoesNotThrow(() -> rlmm.addRemoteLogSegmentMetadata(thirdMetadata).get(),
+        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(thirdMetadata).get(),
                 "Should be able to add new segment with compacted policy");
 
         System.out.println("✅ Test passed! Upgrade scenario with mixed message formats works correctly.");
