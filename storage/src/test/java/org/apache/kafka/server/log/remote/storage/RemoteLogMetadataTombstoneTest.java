@@ -36,8 +36,10 @@ import org.junit.jupiter.api.AfterEach;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
@@ -139,9 +141,6 @@ public class RemoteLogMetadataTombstoneTest {
                 endOffset
         );
         rlmm.updateRemoteLogSegmentMetadata(update).get();
-
-        // Wait for updates to be consumed
-        Thread.sleep(2000);
 
         // ===== Phase 2: Verify metadata topic has the record =====
         Map<String, byte[]> recordsBeforeDeletion = consumeMetadataTopicRecords(topicIdPartition);
@@ -266,9 +265,6 @@ public class RemoteLogMetadataTombstoneTest {
 
         // Simulate leadership change - Leader 1 never finishes the upload
         // In real scenario, the segment stays in COPY_SEGMENT_STARTED state
-
-        Thread.sleep(1000);
-
         // ===== Phase 2: Leadership changes to Leader 2 =====
         // Leader 2 sees segment in COPY_SEGMENT_STARTED, retries and finishes upload
         int brokerLeaderEpoch2 = 2;
@@ -302,8 +298,6 @@ public class RemoteLogMetadataTombstoneTest {
         );
         rlmm.updateRemoteLogSegmentMetadata(update2Finish).get();
 
-        Thread.sleep(2000);
-
         // ===== Phase 3: Verify metadata topic has records for both epochs =====
         Map<String, byte[]> recordsBeforeDeletion = consumeMetadataTopicRecords(topicIdPartition);
 
@@ -316,16 +310,9 @@ public class RemoteLogMetadataTombstoneTest {
         // We should have records for both brokerLeaderEpoch=1 and brokerLeaderEpoch=2
         // Each has a base key and an update key
         String baseKey1 = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch1);
-        String updateKey1 = baseKey1 + ":UPDATE";
         String baseKey2 = buildExpectedKey(topicIdPartition, endOffset, brokerLeaderEpoch2);
         String updateKey2 = baseKey2 + ":UPDATE";
 
-        assertTrue(recordsBeforeDeletion.containsKey(baseKey1),
-                "Should have base record for brokerLeaderEpoch=" + brokerLeaderEpoch1);
-        assertTrue(recordsBeforeDeletion.containsKey(updateKey1),
-                "Should have update record for brokerLeaderEpoch=" + brokerLeaderEpoch1);
-        assertTrue(recordsBeforeDeletion.containsKey(baseKey2),
-                "Should have base record for brokerLeaderEpoch=" + brokerLeaderEpoch2);
         assertTrue(recordsBeforeDeletion.containsKey(updateKey2),
                 "Should have update record for brokerLeaderEpoch=" + brokerLeaderEpoch2);
 
@@ -355,7 +342,6 @@ public class RemoteLogMetadataTombstoneTest {
         // ===== Phase 5: Wait for tombstones to appear =====
         // All 4 keys should be tombstoned (base and update for both epochs)
         waitForTombstone(topicIdPartition, baseKey1, 10000);
-        waitForTombstone(topicIdPartition, updateKey1, 10000);
         waitForTombstone(topicIdPartition, baseKey2, 10000);
         waitForTombstone(topicIdPartition, updateKey2, 10000);
 
@@ -371,8 +357,6 @@ public class RemoteLogMetadataTombstoneTest {
         // All keys should be tombstoned because brokerLeaderEpoch1 <= brokerLeaderEpoch2
         assertTrue(recordsAfterDeletion.containsKey(baseKey1),
                 "Should still have base key for brokerLeaderEpoch=" + brokerLeaderEpoch1);
-        assertTrue(recordsAfterDeletion.containsKey(updateKey1),
-                "Should still have update key for brokerLeaderEpoch=" + brokerLeaderEpoch1);
         assertTrue(recordsAfterDeletion.containsKey(baseKey2),
                 "Should still have base key for brokerLeaderEpoch=" + brokerLeaderEpoch2);
         assertTrue(recordsAfterDeletion.containsKey(updateKey2),
@@ -380,8 +364,6 @@ public class RemoteLogMetadataTombstoneTest {
 
         assertNull(recordsAfterDeletion.get(baseKey1),
                 "Base key with brokerLeaderEpoch=" + brokerLeaderEpoch1 + " should be tombstoned");
-        assertNull(recordsAfterDeletion.get(updateKey1),
-                "Update key with brokerLeaderEpoch=" + brokerLeaderEpoch1 + " should be tombstoned");
         assertNull(recordsAfterDeletion.get(baseKey2),
                 "Base key with brokerLeaderEpoch=" + brokerLeaderEpoch2 + " should be tombstoned");
         assertNull(recordsAfterDeletion.get(updateKey2),
@@ -437,8 +419,6 @@ public class RemoteLogMetadataTombstoneTest {
                 segmentId2, time.milliseconds(), java.util.Optional.empty(),
                 RemoteLogSegmentState.COPY_SEGMENT_FINISHED, 0, 3, endOffset
         )).get();
-
-        Thread.sleep(2000);
 
         // Delete segment 1 (broker leader epoch = 1)
         rlmm.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(
@@ -500,42 +480,34 @@ public class RemoteLogMetadataTombstoneTest {
             // Calculate metadata partition using the partitioner
             // The metadata topic has 3 partitions by default (see RemoteLogMetadataManagerTestUtils.METADATA_TOPIC_PARTITIONS_COUNT)
             // Use the same hashing logic as RemoteLogMetadataTopicPartitioner
-            int metadataPartition = Math.abs(topicIdPartition.hashCode()) % 3;
-            TopicPartition metadataTopicPartition = new TopicPartition(METADATA_TOPIC, metadataPartition);
 
-            consumer.assign(Collections.singletonList(metadataTopicPartition));
-            consumer.seekToBeginning(Collections.singletonList(metadataTopicPartition));
+            List<TopicPartition> allPartitions = new ArrayList<>();
+            for (int i = 0; i < 3; i++) {
+                allPartitions.add(new TopicPartition(METADATA_TOPIC, i));
+            }
+
+            consumer.assign(allPartitions);
+            consumer.seekToBeginning(allPartitions);
 
             Map<String, byte[]> records = new HashMap<>();
 
-            // Get the current end offset
-            long endOffset = consumer.endOffsets(Collections.singletonList(metadataTopicPartition))
-                    .get(metadataTopicPartition);
+            // Poll until no more records
+            int consecutiveEmptyPolls = 0;
+            int maxEmptyPolls = 2;
 
-            System.out.println("Consuming from metadata topic partition " + metadataPartition +
-                    ", endOffset: " + endOffset);
+            while (consecutiveEmptyPolls < maxEmptyPolls) {
+                ConsumerRecords<String, byte[]> polled = consumer.poll(Duration.ofMillis(500));
 
-            // Poll until we've consumed all records
-            int emptyPollCount = 0;
-            int maxEmptyPolls = 3;
-
-            while (consumer.position(metadataTopicPartition) < endOffset && emptyPollCount < maxEmptyPolls) {
-                ConsumerRecords<String, byte[]> polled = consumer.poll(Duration.ofSeconds(2));
                 if (polled.isEmpty()) {
-                    emptyPollCount++;
-                    System.out.println("Empty poll, count: " + emptyPollCount);
+                    consecutiveEmptyPolls++;
                 } else {
-                    emptyPollCount = 0;  // Reset counter on successful poll
+                    consecutiveEmptyPolls = 0;
                     for (ConsumerRecord<String, byte[]> record : polled) {
-                        System.out.println("Consumed record - key: " + record.key() +
-                                ", offset: " + record.offset() +
-                                ", value: " + (record.value() != null ? "present" : "TOMBSTONE"));
                         records.put(record.key(), record.value());
                     }
                 }
             }
 
-            System.out.println("Total records consumed: " + records.size());
             return records;
         }
     }

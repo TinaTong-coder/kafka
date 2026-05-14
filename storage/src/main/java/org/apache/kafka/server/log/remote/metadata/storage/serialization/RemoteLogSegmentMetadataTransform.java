@@ -44,7 +44,8 @@ public class RemoteLogSegmentMetadataTransform implements RemoteLogMetadataTrans
                 .setSegmentSizeInBytes(segmentMetadata.segmentSizeInBytes())
                 .setSegmentLeaderEpochs(createSegmentLeaderEpochsEntry(segmentMetadata))
                 .setRemoteLogSegmentState(segmentMetadata.state().id())
-                .setTxnIndexEmpty(segmentMetadata.isTxnIdxEmpty());
+                .setTxnIndexEmpty(segmentMetadata.isTxnIdxEmpty())
+                .setBrokerLeaderEpoch(segmentMetadata.brokerLeaderEpoch());
         segmentMetadata.customMetadata().ifPresent(md -> record.setCustomMetadata(md.value()));
 
         return new ApiMessageAndVersion(record, record.highestSupportedVersion());
