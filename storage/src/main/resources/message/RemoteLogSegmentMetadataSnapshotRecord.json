@@ -110,6 +110,7 @@
       "versions": "1+",
       "taggedVersions": "1+",
       "tag": 1,
+      "default": "-1",
       "about": "The leader epoch of the broker (partition leader epoch) at the time this segment is being uploaded."
     }
   ]
