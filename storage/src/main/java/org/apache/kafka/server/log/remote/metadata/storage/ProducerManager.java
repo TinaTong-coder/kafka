@@ -24,8 +24,8 @@ import org.apache.kafka.common.KafkaException;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde;
 import org.apache.kafka.server.log.remote.storage.RemoteLogMetadata;
-
 import org.apache.kafka.server.log.remote.storage.RemoteLogSegmentMetadata;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
