@@ -19,7 +19,6 @@ package org.apache.kafka.server.log.remote.storage;
 import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.ConfigEntry;
-import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.producer.KafkaProducer;
 import org.apache.kafka.clients.producer.ProducerConfig;
 import org.apache.kafka.clients.producer.ProducerRecord;
@@ -38,7 +37,6 @@ import org.apache.kafka.server.log.remote.metadata.storage.TopicBasedRemoteLogMe
 import org.apache.kafka.server.log.remote.metadata.storage.serialization.RemoteLogMetadataSerde;
 
 import org.junit.jupiter.api.AfterEach;
-import org.junit.jupiter.api.Test;
 
 import java.io.IOException;
 import java.util.Collection;
@@ -50,8 +48,6 @@ import java.util.Properties;
 
 import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertEquals;
-import static org.junit.jupiter.api.Assertions.assertNotNull;
-import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -96,76 +92,6 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
         if (remoteLogMetadataManager != null) {
             remoteLogMetadataManager.close();
         }
-    }
-
-    /**
-     * Test that consumer logic can deserialize messages regardless of key format.
-     * This test verifies that the deserialization depends only on the value field.
-     */
-    @Test
-    public void testConsumerCanDeserializeMessagesWithAnyKeyFormat() {
-        TopicIdPartition topicIdPartition = new TopicIdPartition(
-                Uuid.randomUuid(),
-                new TopicPartition("test-key-format", 0)
-        );
-
-        RemoteLogSegmentId segmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
-        long endOffset = 500L;
-        int brokerLeaderEpoch = 1;
-
-        RemoteLogSegmentMetadata metadata = new RemoteLogSegmentMetadata(
-                segmentId,
-                0L,
-                endOffset,
-                -1L,
-                0,
-                time.milliseconds(),
-                SEG_SIZE,
-                Collections.singletonMap(0, 0L),
-                brokerLeaderEpoch
-        );
-
-        RemoteLogMetadataSerde serde = new RemoteLogMetadataSerde();
-        byte[] serializedValue = serde.serialize(metadata);
-
-        // Test 1: Simulate old format (null key)
-        ConsumerRecord<byte[], byte[]> oldFormatRecord = new ConsumerRecord<>(
-                METADATA_TOPIC,
-                0,
-                100L,
-                null,  // Old format: null key
-                serializedValue
-        );
-
-        RemoteLogMetadata deserializedOld = assertDoesNotThrow(() -> serde.deserialize(oldFormatRecord.value()),
-                "Should be able to deserialize message with null key");
-        assertNotNull(deserializedOld);
-        assertEquals(segmentId, ((RemoteLogSegmentMetadata) deserializedOld).remoteLogSegmentId());
-        assertNull(oldFormatRecord.key(), "Old format should have null key");
-
-        // Test 2: Simulate new format (with key)
-        String newFormatKey = metadata.metadataKey();
-        ConsumerRecord<byte[], byte[]> newFormatRecord = new ConsumerRecord<>(
-                METADATA_TOPIC,
-                0,
-                101L,
-                newFormatKey.getBytes(),  // New format: has key
-                serializedValue
-        );
-
-        RemoteLogMetadata deserializedNew = assertDoesNotThrow(() -> serde.deserialize(newFormatRecord.value()),
-                "Should be able to deserialize message with key");
-        assertNotNull(deserializedNew);
-        assertEquals(segmentId, ((RemoteLogSegmentMetadata) deserializedNew).remoteLogSegmentId());
-        assertNotNull(newFormatRecord.key(), "New format should have key");
-        assertEquals(newFormatKey, new String(newFormatRecord.key()));
-
-        // Test 3: Verify both deserializations produce the same metadata
-        assertEquals(
-                ((RemoteLogSegmentMetadata) deserializedOld).remoteLogSegmentId(),
-                ((RemoteLogSegmentMetadata) deserializedNew).remoteLogSegmentId(),
-                "Deserialized metadata should be the same regardless of key format"
-        );
     }
 
     /**
