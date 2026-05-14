@@ -61,3 +61,4 @@ storage/kafka-tiered-storage/
 docker/test/report_*.html
 kafka.Kafka
 __pycache__
+storage/src/test/java/org/apache/kafka/ViewMetadata.java
