@@ -235,6 +235,16 @@ public class RemoteLogManagerTest {
         config = configs(props);
         brokerTopicStats = new BrokerTopicStats(config.isRemoteStorageSystemEnabled());
 
+        // Configure mockLog with necessary mocks for background tasks
+        when(mockLog.parentDir()).thenReturn("test-dir");
+        when(mockLog.config()).thenReturn(new LogConfig(new Properties()));
+        // Create a minimal LeaderEpochFileCache for mockLog
+        LeaderEpochCheckpointFile defaultCheckpoint = new LeaderEpochCheckpointFile(TestUtils.tempFile(), new LogDirFailureChannel(1));
+        defaultCheckpoint.write(Collections.singletonList(new EpochEntry(0, 0L)));
+        LeaderEpochFileCache defaultCache = new LeaderEpochFileCache(leaderTopicIdPartition.topicPartition(), defaultCheckpoint, scheduler);
+        when(mockLog.leaderEpochCache()).thenReturn(defaultCache);
+        when(mockLog.topicPartition()).thenReturn(leaderTopicIdPartition.topicPartition());
+
         remoteLogManager = new RemoteLogManager(config, brokerId, logDir, clusterId, time,
                 tp -> Optional.of(mockLog),
                 (topicPartition, offset) -> currentLogStartOffset.set(offset),
@@ -2480,6 +2490,10 @@ public class RemoteLogManagerTest {
         when(remoteLogMetadataManager.updateRemoteLogSegmentMetadata(any()))
                 .thenReturn(dummyFuture);
 
+        // First, make both partitions leaders so they are added to topicIdPartitionToLeaderEpochMap
+        remoteLogManager.onLeadershipChange(Set.of(mockPartition(leaderTopicIdPartition), mockPartition(followerTopicIdPartition)),
+                Set.of(), topicIds);
+        // Then, convert followerTopicIdPartition to follower (but keep its leader epoch in the map)
         remoteLogManager.onLeadershipChange(Set.of(mockPartition(leaderTopicIdPartition)),
                 Set.of(mockPartition(followerTopicIdPartition)), topicIds);
         assertNotNull(remoteLogManager.leaderCopyTask(leaderTopicIdPartition));
@@ -3826,11 +3840,32 @@ public class RemoteLogManagerTest {
     @ParameterizedTest
     @ValueSource(booleans = {false, true})
     public void testCopyQuota(boolean quotaExceeded) throws Exception {
-        RemoteLogManager.RLMCopyTask task = setupRLMTask(quotaExceeded);
+        setupRLMTask(quotaExceeded);
+
+        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
+        // Create a mockPartition that returns our properly configured mockLog
+        TopicPartition tp = leaderTopicIdPartition.topicPartition();
+        TopicPartitionLog mockLeaderPartition = mock(TopicPartitionLog.class);
+        when(mockLeaderPartition.topicPartition()).thenReturn(tp);
+        when(mockLog.remoteLogEnabled()).thenReturn(true);  // Enable remote log for the mockLog
+        when(mockLeaderPartition.unifiedLog()).thenReturn(Optional.of(mockLog));
+        when(mockLeaderPartition.getLeaderEpoch()).thenReturn(0); // Mock the leader epoch
+        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
+        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+
+        // Cancel the background task created by onLeadershipChange to prevent interference
+        RemoteLogManager.RLMTaskWithFuture backgroundTaskWithFuture = remoteLogManager.leaderCopyTask(leaderTopicIdPartition);
+        backgroundTaskWithFuture.cancel();
+        // Wait a bit to ensure the background task is fully stopped
+        Thread.sleep(100);
+        // Clear any invocations from the background task
+        clearInvocations(mockLog);
+        // Recreate the task for manual testing
+        final RemoteLogManager.RLMCopyTask testTask = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
 
         if (quotaExceeded) {
             // Verify that the copy operation times out, since no segments can be copied due to quota being exceeded
-            assertThrows(AssertionFailedError.class, () -> assertTimeoutPreemptively(Duration.ofMillis(200), () -> task.copyLogSegmentsToRemote(mockLog)));
+            assertThrows(AssertionFailedError.class, () -> assertTimeoutPreemptively(Duration.ofMillis(200), () -> testTask.copyLogSegmentsToRemote(mockLog)));
 
             Map<org.apache.kafka.common.MetricName, KafkaMetric> allMetrics = metrics.metrics();
             KafkaMetric avgMetric = allMetrics.get(metrics.metricName("remote-copy-throttle-time-avg", "RemoteLogManager"));
@@ -3845,7 +3880,7 @@ public class RemoteLogManagerTest {
             assertEquals(-1L, capture.getValue());
         } else {
             // Verify the copy operation completes within the timeout, since it does not need to wait for quota availability
-            assertTimeoutPreemptively(Duration.ofMillis(1000), () -> task.copyLogSegmentsToRemote(mockLog));
+            assertTimeoutPreemptively(Duration.ofMillis(1000), () -> testTask.copyLogSegmentsToRemote(mockLog));
 
             // Verify quota check was performed
             verify(rlmCopyQuotaManager, times(1)).getThrottleTimeMs();
@@ -3949,16 +3984,6 @@ public class RemoteLogManagerTest {
 
         when(rlmCopyQuotaManager.getThrottleTimeMs()).thenReturn(quotaExceeded ? 1000L : 0L);
         doNothing().when(rlmCopyQuotaManager).record(anyInt());
-
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        // Create a mockPartition that returns our properly configured mockLog
-        TopicPartition tp = leaderTopicIdPartition.topicPartition();
-        TopicPartitionLog mockLeaderPartition = mock(TopicPartitionLog.class);
-        when(mockLeaderPartition.topicPartition()).thenReturn(tp);
-        when(mockLeaderPartition.unifiedLog()).thenReturn(Optional.of(mockLog));
-
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
 
         return remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
     }
@@ -4339,6 +4364,22 @@ public class RemoteLogManagerTest {
         when(log.remoteLogEnabled()).thenReturn(true);
         when(partition.unifiedLog()).thenReturn(Optional.of(log));
         when(log.config()).thenReturn(new LogConfig(new Properties()));
+        when(partition.getLeaderEpoch()).thenReturn(0); // Mock leader epoch for map initialization
+
+        // Mock additional log properties needed by background tasks
+        when(log.topicPartition()).thenReturn(tp);
+        when(log.parentDir()).thenReturn("test-dir");
+
+        // Create a minimal LeaderEpochFileCache for background tasks
+        try {
+            LeaderEpochCheckpointFile checkpoint = new LeaderEpochCheckpointFile(TestUtils.tempFile(), new LogDirFailureChannel(1));
+            checkpoint.write(Collections.singletonList(new EpochEntry(0, 0L)));
+            LeaderEpochFileCache cache = new LeaderEpochFileCache(tp, checkpoint, scheduler);
+            when(log.leaderEpochCache()).thenReturn(cache);
+        } catch (IOException e) {
+            throw new RuntimeException(e);
+        }
+
         return partition;
     }
 
