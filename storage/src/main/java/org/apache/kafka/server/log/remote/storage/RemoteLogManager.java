@@ -1666,6 +1666,11 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
         return getBrokerLeaderEpochForPublish(topicIdPartition, "Segment: " + segmentMetadata.remoteLogSegmentId());
     }
 
+    // Visible for testing
+    void setLeaderEpochForPartition(TopicIdPartition topicIdPartition, int leaderEpoch) {
+        topicIdPartitionToLeaderEpochMap.put(topicIdPartition, leaderEpoch);
+    }
+
     private boolean deleteRemoteLogSegment(
         RemoteLogSegmentMetadata segmentMetadata,
         Predicate<RemoteLogSegmentMetadata> predicate

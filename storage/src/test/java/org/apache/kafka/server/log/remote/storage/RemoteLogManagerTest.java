@@ -560,10 +560,8 @@ public class RemoteLogManagerTest {
         assertEquals(0, brokerTopicStats.allTopicsStats().remoteCopyBytesRate().count());
         assertEquals(0, brokerTopicStats.allTopicsStats().failedRemoteCopyRequestRate().count());
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        TopicPartitionLog mockLeaderPartition = mockPartition(leaderTopicIdPartition);
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
         RemoteLogManager.RLMCopyTask task = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
         task.copyLogSegmentsToRemote(mockLog);
@@ -673,10 +671,8 @@ public class RemoteLogManagerTest {
                 .thenReturn(Optional.of(customMetadata));
         when(rlmCopyQuotaManager.getThrottleTimeMs()).thenReturn(quotaAvailableThrottleTime);
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        TopicPartitionLog mockLeaderPartition = mockPartition(leaderTopicIdPartition);
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
         RemoteLogManager.RLMCopyTask task = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, customMetadataSizeLimit);
         task.copyLogSegmentsToRemote(mockLog);
@@ -772,10 +768,8 @@ public class RemoteLogManagerTest {
         when(remoteStorageManager.copyLogSegmentData(any(RemoteLogSegmentMetadata.class), any(LogSegmentData.class)))
                 .thenThrow(new RemoteStorageException("test"));
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        TopicPartitionLog mockLeaderPartition = mockPartition(leaderTopicIdPartition);
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
         RemoteLogManager.RLMCopyTask task = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
         task.copyLogSegmentsToRemote(mockLog);
@@ -865,10 +859,8 @@ public class RemoteLogManagerTest {
         when(remoteStorageManager.copyLogSegmentData(any(RemoteLogSegmentMetadata.class), any(LogSegmentData.class)))
             .thenThrow(new RetriableRemoteStorageException("test-retriable"));
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        TopicPartitionLog mockLeaderPartition = mockPartition(leaderTopicIdPartition);
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
         RemoteLogManager.RLMCopyTask task = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
         assertThrows(RetriableRemoteStorageException.class, () -> task.copyLogSegmentsToRemote(mockLog));
@@ -1340,10 +1332,8 @@ public class RemoteLogManagerTest {
         assertEquals(0, brokerTopicStats.allTopicsStats().remoteCopyRequestRate().count());
         assertEquals(0, brokerTopicStats.allTopicsStats().failedRemoteCopyRequestRate().count());
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        TopicPartitionLog mockLeaderPartition = mockPartition(leaderTopicIdPartition);
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
         RemoteLogManager.RLMCopyTask task = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
         task.copyLogSegmentsToRemote(mockLog);
@@ -2826,7 +2816,7 @@ public class RemoteLogManagerTest {
         assertEquals(0, brokerTopicStats.allTopicsStats().remoteDeleteRequestRate().count());
         assertEquals(0, brokerTopicStats.allTopicsStats().failedRemoteDeleteRequestRate().count());
 
-
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
         if (expectDeletion) {
             advanceTimeToMakeSegmentDeletable();
@@ -2903,6 +2893,7 @@ public class RemoteLogManagerTest {
         assertEquals(0, brokerTopicStats.allTopicsStats().remoteDeleteRequestRate().count());
         assertEquals(0, brokerTopicStats.allTopicsStats().failedRemoteDeleteRequestRate().count());
 
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
         advanceTimeToMakeSegmentDeletable();
         task.cleanupExpiredRemoteLogSegments();
@@ -2956,6 +2947,7 @@ public class RemoteLogManagerTest {
             return Optional.empty();
         }).when(remoteStorageManager).deleteLogSegmentData(any(RemoteLogSegmentMetadata.class));
 
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
 
         verifyRemoteDeleteMetrics(0L, 0L);
@@ -3028,6 +3020,7 @@ public class RemoteLogManagerTest {
         doNothing().when(remoteStorageManager).deleteLogSegmentData(any(RemoteLogSegmentMetadata.class));
 
         // RUN 1
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
         task.cleanupExpiredRemoteLogSegments();
         verify(remoteStorageManager, times(2)).deleteLogSegmentData(any(RemoteLogSegmentMetadata.class));
@@ -3059,6 +3052,7 @@ public class RemoteLogManagerTest {
 
     @Test
     public void testDeleteRetentionMsBeingCancelledBeforeSecondDelete() throws RemoteStorageException, ExecutionException, InterruptedException {
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask leaderTask = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
 
         when(mockLog.topicPartition()).thenReturn(leaderTopicIdPartition.topicPartition());
@@ -3099,6 +3093,7 @@ public class RemoteLogManagerTest {
         verify(remoteStorageManager, never()).deleteLogSegmentData(metadataList.get(1));
 
         // test that the 2nd log segment will be deleted by the new leader
+        remoteLogManager.setLeaderEpochForPartition(followerTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask newLeaderTask = remoteLogManager.new RLMExpirationTask(followerTopicIdPartition);
 
         Iterator<RemoteLogSegmentMetadata> firstIterator = metadataList.iterator();
@@ -3130,6 +3125,7 @@ public class RemoteLogManagerTest {
         LogConfig mockLogConfig = new LogConfig(Map.of("retention.ms", time.milliseconds() + 24 * 30 * 60 * 60 * 1000L));
         when(mockLog.config()).thenReturn(mockLogConfig);
 
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask leaderTask = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
 
         when(mockLog.topicPartition()).thenReturn(leaderTopicIdPartition.topicPartition());
@@ -3187,6 +3183,7 @@ public class RemoteLogManagerTest {
         assertEquals(0, brokerTopicStats.allTopicsStats().remoteDeleteRequestRate().count());
         assertEquals(0, brokerTopicStats.allTopicsStats().failedRemoteDeleteRequestRate().count());
 
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
         doThrow(new RemoteStorageException("Failed to delete segment")).when(remoteStorageManager).deleteLogSegmentData(any());
         advanceTimeToMakeSegmentDeletable();
@@ -3243,6 +3240,7 @@ public class RemoteLogManagerTest {
         assertEquals(0, brokerTopicStats.allTopicsStats().remoteDeleteRequestRate().count());
         assertEquals(0, brokerTopicStats.allTopicsStats().failedRemoteDeleteRequestRate().count());
 
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
         doThrow(new RetriableRemoteStorageException("Failed to delete segment with retriable exception")).when(remoteStorageManager).deleteLogSegmentData(any());
         advanceTimeToMakeSegmentDeletable();
@@ -3377,6 +3375,7 @@ public class RemoteLogManagerTest {
                 });
         when(remoteLogMetadataManager.updateRemoteLogSegmentMetadata(any(RemoteLogSegmentMetadataUpdate.class)))
                 .thenAnswer(answer -> CompletableFuture.runAsync(() -> { }));
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
         RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
         task.cleanupExpiredRemoteLogSegments();
 
@@ -3408,6 +3407,7 @@ public class RemoteLogManagerTest {
                 return remoteLogMetadataManager;
             }
         }) {
+            remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
             RemoteLogManager.RLMExpirationTask task = remoteLogManager.new RLMExpirationTask(leaderTopicIdPartition);
 
             when(mockLog.topicPartition()).thenReturn(leaderTopicIdPartition.topicPartition());
@@ -3842,25 +3842,9 @@ public class RemoteLogManagerTest {
     public void testCopyQuota(boolean quotaExceeded) throws Exception {
         setupRLMTask(quotaExceeded);
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        // Create a mockPartition that returns our properly configured mockLog
-        TopicPartition tp = leaderTopicIdPartition.topicPartition();
-        TopicPartitionLog mockLeaderPartition = mock(TopicPartitionLog.class);
-        when(mockLeaderPartition.topicPartition()).thenReturn(tp);
-        when(mockLog.remoteLogEnabled()).thenReturn(true);  // Enable remote log for the mockLog
-        when(mockLeaderPartition.unifiedLog()).thenReturn(Optional.of(mockLog));
-        when(mockLeaderPartition.getLeaderEpoch()).thenReturn(0); // Mock the leader epoch
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap using the helper method
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
-        // Cancel the background task created by onLeadershipChange to prevent interference
-        RemoteLogManager.RLMTaskWithFuture backgroundTaskWithFuture = remoteLogManager.leaderCopyTask(leaderTopicIdPartition);
-        backgroundTaskWithFuture.cancel();
-        // Wait a bit to ensure the background task is fully stopped
-        Thread.sleep(100);
-        // Clear any invocations from the background task
-        clearInvocations(mockLog);
-        // Recreate the task for manual testing
         final RemoteLogManager.RLMCopyTask testTask = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
 
         if (quotaExceeded) {
@@ -4055,10 +4039,8 @@ public class RemoteLogManagerTest {
         when(rlmCopyQuotaManager.getThrottleTimeMs()).thenReturn(0L, 1000L);
         doNothing().when(rlmCopyQuotaManager).record(anyInt());
 
-        // Initialize topicIdPartitionToLeaderEpochMap by calling onLeadershipChange
-        TopicPartitionLog mockLeaderPartition = mockPartition(leaderTopicIdPartition);
-        Map<String, Uuid> topicIds = Collections.singletonMap(leaderTopicIdPartition.topic(), leaderTopicIdPartition.topicId());
-        remoteLogManager.onLeadershipChange(Set.of(mockLeaderPartition), Set.of(), topicIds);
+        // Initialize topicIdPartitionToLeaderEpochMap
+        remoteLogManager.setLeaderEpochForPartition(leaderTopicIdPartition, 0);
 
         RemoteLogManager.RLMCopyTask task = remoteLogManager.new RLMCopyTask(leaderTopicIdPartition, 128);
 
