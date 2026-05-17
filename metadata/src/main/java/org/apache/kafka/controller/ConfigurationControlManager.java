@@ -756,17 +756,26 @@ public class ConfigurationControlManager {
         int currentClaimEpoch
     ) {
         ControllerResult<ApiError> result = featureControl.updateFeatures(updates, upgradeTypes, validateOnly, currentClaimEpoch);
-        if (result.response().isSuccess() &&
-            !validateOnly &&
-            updates.getOrDefault(EligibleLeaderReplicasVersion.FEATURE_NAME, (short) 0) > 0
-        ) {
-            List<ApiMessageAndVersion> records = BoundedList.newArrayBacked(MAX_RECORDS_PER_USER_OP);
-            String logMessage = maybeGenerateElrSafetyRecords(records);
-            if (!logMessage.isEmpty()) {
-                log.info("{}", logMessage);
+        if (result.response().isSuccess() && !validateOnly) {
+            List<ApiMessageAndVersion> additionalRecords = BoundedList.newArrayBacked(MAX_RECORDS_PER_USER_OP);
+
+            // Handle ELR safety records for EligibleLeaderReplicasVersion
+            if (updates.getOrDefault(EligibleLeaderReplicasVersion.FEATURE_NAME, (short) 0) > 0) {
+                String logMessage = maybeGenerateElrSafetyRecords(additionalRecords);
+                if (!logMessage.isEmpty()) {
+                    log.info("{}", logMessage);
+                }
             }
-            records.addAll(result.records());
-            return ControllerResult.atomicOf(records, ApiError.NONE);
+
+            // Handle remote log metadata topic compaction for RemoteLogStorageVersion
+            if (updates.getOrDefault(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME, (short) 0) >= 1) {
+                maybeGenerateRemoteLogMetadataTopicCompactionRecord().ifPresent(additionalRecords::add);
+            }
+
+            if (!additionalRecords.isEmpty()) {
+                additionalRecords.addAll(result.records());
+                return ControllerResult.atomicOf(additionalRecords, ApiError.NONE);
+            }
         }
         return result;
     }
@@ -811,13 +820,15 @@ public class ConfigurationControlManager {
     }
 
     /**
-     * Updates the __remote_log_metadata topic to use compaction cleanup policy.
-     * This is called when the remote.log.storage.version feature is upgraded to level 1 or higher.
+     * Generates a ConfigRecord to update the __remote_log_metadata topic to use compaction cleanup policy.
+     * This is called when the remote.log.storage.version feature is being upgraded to level 1 or higher.
      *
      * The method checks if the topic exists and if it already has compaction enabled.
-     * If not, it replays a ConfigRecord to update the cleanup policy to compact.
+     * If an update is needed, it returns an ApiMessageAndVersion containing the ConfigRecord.
+     *
+     * @return Optional containing the ConfigRecord if update is needed, empty otherwise
      */
-    void maybeUpdateRemoteLogMetadataTopicToCompacted() {
+    Optional<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicCompactionRecord() {
         String topicName = "__remote_log_metadata";
         ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
 
@@ -825,30 +836,25 @@ public class ConfigurationControlManager {
         TimelineHashMap<String, String> configs = configData.get(topicResource);
         if (configs == null) {
             log.info("Topic {} does not exist yet. It will be created with compaction when needed.", topicName);
-            return;
+            return Optional.empty();
         }
 
         // Check current cleanup policy
         String currentPolicy = configs.get(TopicConfig.CLEANUP_POLICY_CONFIG);
         if (currentPolicy != null && currentPolicy.contains(TopicConfig.CLEANUP_POLICY_COMPACT)) {
             log.info("Topic {} already uses compaction cleanup policy.", topicName);
-            return;
+            return Optional.empty();
         }
 
-        log.info("Updating topic {} cleanup policy from '{}' to compact.", topicName, currentPolicy);
+        log.info("Generating ConfigRecord to update topic {} cleanup policy from '{}' to compact.", topicName, currentPolicy);
 
-        // Create and replay a ConfigRecord to update the cleanup policy
+        // Create a ConfigRecord to update the cleanup policy
         ConfigRecord configRecord = new ConfigRecord()
             .setResourceType(Type.TOPIC.id())
             .setResourceName(topicName)
             .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
             .setValue(TopicConfig.CLEANUP_POLICY_COMPACT);
 
-        replay(configRecord);
-
-        log.info("Topic {} is now configured for compaction. " +
-                "All new messages have keys, so compaction will work correctly. " +
-                "Old null-key messages will be removed via retention policy.",
-            topicName);
+        return Optional.of(new ApiMessageAndVersion(configRecord, (short) 0));
     }
 }

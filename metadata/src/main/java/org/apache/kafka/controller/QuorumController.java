@@ -1253,12 +1253,6 @@ public final class QuorumController implements Controller {
             case FEATURE_LEVEL_RECORD:
                 FeatureLevelRecord featureLevelRecord = (FeatureLevelRecord) message;
                 featureControl.replay(featureLevelRecord);
-                // When remote.log.storage.version is upgraded to 1 or higher,
-                // update __remote_log_metadata topic to use compaction
-                if (featureLevelRecord.name().equals(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME) &&
-                    featureLevelRecord.featureLevel() >= 1) {
-                    configurationControl.maybeUpdateRemoteLogMetadataTopicToCompacted();
-                }
                 break;
             case CLIENT_QUOTA_RECORD:
                 clientQuotaControlManager.replay((ClientQuotaRecord) message);

@@ -41,12 +41,12 @@ public enum RemoteLogStorageVersion implements FeatureVersion {
     RLS_V0(0, MetadataVersion.IBP_3_5_IV0, Map.of()),
 
     /**
-     * Version 1: Compaction enabled.
+     * Version 1: Compaction enabled (targeting 4.6 release).
      * - Topic uses compaction cleanup policy
      * - Messages are produced with keys
      * - Enables space savings through log compaction
      */
-    RLS_V1(1, MetadataVersion.IBP_4_1_IV0, Map.of());
+    RLS_V1(1, MetadataVersion.IBP_4_4_IV0, Map.of());
 
     public static final String FEATURE_NAME = "remote.log.storage.version";
 
