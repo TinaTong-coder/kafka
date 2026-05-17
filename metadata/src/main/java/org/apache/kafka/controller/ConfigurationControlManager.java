@@ -809,4 +809,46 @@ public class ConfigurationControlManager {
     TimelineHashSet<Integer> brokersWithConfigs() {
         return brokersWithConfigs;
     }
+
+    /**
+     * Updates the __remote_log_metadata topic to use compaction cleanup policy.
+     * This is called when the remote.log.storage.version feature is upgraded to level 1 or higher.
+     *
+     * The method checks if the topic exists and if it already has compaction enabled.
+     * If not, it replays a ConfigRecord to update the cleanup policy to compact.
+     */
+    void maybeUpdateRemoteLogMetadataTopicToCompacted() {
+        String topicName = "__remote_log_metadata";
+        ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
+
+        // Check if topic configuration exists
+        TimelineHashMap<String, String> configs = configData.get(topicResource);
+        if (configs == null) {
+            log.info("Topic {} does not exist yet. It will be created with compaction when needed.", topicName);
+            return;
+        }
+
+        // Check current cleanup policy
+        String currentPolicy = configs.get(TopicConfig.CLEANUP_POLICY_CONFIG);
+        if (currentPolicy != null && currentPolicy.contains(TopicConfig.CLEANUP_POLICY_COMPACT)) {
+            log.info("Topic {} already uses compaction cleanup policy.", topicName);
+            return;
+        }
+
+        log.info("Updating topic {} cleanup policy from '{}' to compact.", topicName, currentPolicy);
+
+        // Create and replay a ConfigRecord to update the cleanup policy
+        ConfigRecord configRecord = new ConfigRecord()
+            .setResourceType(Type.TOPIC.id())
+            .setResourceName(topicName)
+            .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
+            .setValue(TopicConfig.CLEANUP_POLICY_COMPACT);
+
+        replay(configRecord);
+
+        log.info("Topic {} is now configured for compaction. " +
+                "All new messages have keys, so compaction will work correctly. " +
+                "Old null-key messages will be removed via retention policy.",
+            topicName);
+    }
 }
