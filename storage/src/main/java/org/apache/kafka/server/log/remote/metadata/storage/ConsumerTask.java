@@ -22,6 +22,7 @@ import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.common.TopicIdPartition;
 import org.apache.kafka.common.TopicPartition;
+import org.apache.kafka.common.Uuid;
 import org.apache.kafka.common.errors.RetriableException;
 import org.apache.kafka.common.errors.WakeupException;
 import org.apache.kafka.common.utils.Time;
@@ -165,10 +166,39 @@ class ConsumerTask implements Runnable, Closeable {
 
     private void processConsumerRecord(ConsumerRecord<byte[], byte[]> record) {
         // Tombstone messages (value == null) are used for compaction hints.
-        // We don't need to process them, just track the offset.
+        // We need to process them to clean up the endOffsetToSegments index.
         if (record.value() == null) {
-            log.debug("Skipping tombstone message at offset {} partition {}", record.offset(), record.partition());
+            log.debug("Processing tombstone message at offset {} partition {}", record.offset(), record.partition());
             readOffsetsByMetadataPartition.put(record.partition(), record.offset());
+
+            // Parse the tombstone key to extract metadata and trigger cleanup
+            if (record.key() != null) {
+                String key = new String(record.key());
+                // Remove the :UPDATE suffix if present
+                final String baseKey = key.endsWith(":UPDATE")
+                        ? key.substring(0, key.length() - ":UPDATE".length())
+                        : key;
+
+                // Parse the 5-part key: {topicId}:{topicName}:{partition}:{endOffset}:{brokerLeaderEpoch}
+                String[] parts = baseKey.split(":", 5);
+                if (parts.length == 5) {
+                    try {
+                        Uuid topicId = Uuid.fromString(parts[0]);
+                        String topicName = parts[1];
+                        int partition = Integer.parseInt(parts[2]);
+                        long endOffset = Long.parseLong(parts[3]);
+                        int brokerLeaderEpoch = Integer.parseInt(parts[4]);
+
+                        // Trigger the tombstone event handler to clean up the index
+                        remotePartitionMetadataEventHandler.handleTombstoneEvent(
+                                topicId, topicName, partition, endOffset, brokerLeaderEpoch);
+                    } catch (Exception e) {
+                        log.warn("Failed to parse tombstone key: {}", key, e);
+                    }
+                } else {
+                    log.debug("Skipping tombstone with unexpected key format: {}", key);
+                }
+            }
             return;
         }
 

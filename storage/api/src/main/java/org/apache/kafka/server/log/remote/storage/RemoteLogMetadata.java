@@ -84,6 +84,7 @@ public abstract class RemoteLogMetadata {
     public String metadataKey() {
         TopicIdPartition tip = this.topicIdPartition();
         return tip.topicId() + ":" +
+                tip.topic() + ":" +
                 tip.partition() + ":" +
                 this.endOffset() + ":" +
                 this.brokerLeaderEpoch();

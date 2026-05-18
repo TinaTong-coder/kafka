@@ -163,7 +163,8 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
             CompletableFuture<Void> deleteFinishedFuture = storeRemoteLogMetadata(segmentMetadataUpdate);
 
             // 2. Send tombstones on a best-effort basis (fire-and-forget)
-            // These are optimization hints for compaction and don't affect correctness
+            // These are optimization hints for compaction and don't affect correctness.
+            // Index cleanup will happen when the tombstones are consumed by ConsumerTask.
             try {
                 // TODO: need to find a way to check what messages has already been deleted
                 Iterator<String> toBeTombstonedKeys = remotePartitionMetadataStore.listRemoteLogSegmentKeysByEndOffset(
@@ -171,10 +172,6 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
 
                 while (toBeTombstonedKeys.hasNext()) {
                     String metadataKey = toBeTombstonedKeys.next();
-
-                    // Track completion of both tombstone messages
-                    // No synchronization needed as all callbacks execute on the same consumer thread
-                    boolean[] tombstoneResults = new boolean[2]; // [0]: segment, [1]: update
 
                     // Fire-and-forget: send tombstones but don't wait for completion
                     producerManager.publishTombstone(topicIdPartition, metadataKey)
@@ -184,16 +181,6 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
                                             "will be retried in the future. Error: {}", metadataKey, exception.getMessage());
                                 } else {
                                     log.debug("Successfully published tombstone for key: {}", metadataKey);
-                                    tombstoneResults[0] = true;
-
-                                    // Remove from index only after both tombstones are published
-                                    if (tombstoneResults[1]) {
-                                        remotePartitionMetadataStore.removeFromEndOffsetIndex(
-                                                topicIdPartition,
-                                                segmentMetadataUpdate.endOffset(),
-                                                segmentMetadataUpdate.brokerLeaderEpoch(),
-                                                metadataKey);
-                                    }
                                 }
                             });
 
@@ -204,16 +191,6 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
                                             "will be retried in the future. Error: {}", metadataKey, REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX, exception.getMessage());
                                 } else {
                                     log.debug("Successfully published tombstone for key: {}{}", metadataKey, REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX);
-                                    tombstoneResults[1] = true;
-
-                                    // Remove from index only after both tombstones are published
-                                    if (tombstoneResults[0]) {
-                                        remotePartitionMetadataStore.removeFromEndOffsetIndex(
-                                                topicIdPartition,
-                                                segmentMetadataUpdate.endOffset(),
-                                                segmentMetadataUpdate.brokerLeaderEpoch(),
-                                                metadataKey);
-                                    }
                                 }
                             });
                 }
