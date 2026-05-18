@@ -165,6 +165,7 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
             // 2. Send tombstones on a best-effort basis (fire-and-forget)
             // These are optimization hints for compaction and don't affect correctness
             try {
+                // TODO: need to find a way to check what messages has already been deleted
                 Iterator<String> toBeTombstonedKeys = remotePartitionMetadataStore.listRemoteLogSegmentKeysByEndOffset(
                         topicIdPartition, segmentMetadataUpdate.endOffset(), segmentMetadataUpdate.brokerLeaderEpoch());
 
