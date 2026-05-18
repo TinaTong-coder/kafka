@@ -171,24 +171,49 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
 
                 while (toBeTombstonedKeys.hasNext()) {
                     String metadataKey = toBeTombstonedKeys.next();
-                    // Fire-and-forget: send tombstone but don't wait for completion
+
+                    // Track completion of both tombstone messages
+                    // No synchronization needed as all callbacks execute on the same consumer thread
+                    boolean[] tombstoneResults = new boolean[2]; // [0]: segment, [1]: update
+
+                    // Fire-and-forget: send tombstones but don't wait for completion
                     producerManager.publishTombstone(topicIdPartition, metadataKey)
                             .whenComplete((metadata, exception) -> {
                                 if (exception != null) {
-                                    log.warn("Failed to publish tombstone for key: {}. This is non-critical and compaction " +
-                                            "will eventually clean up the record by the RemoteLogMetadataCleanupManager. Error: {}", metadataKey, exception.getMessage());
+                                    log.warn("Failed to publish tombstone for key: {}. This is non-critical and " +
+                                            "will be retried in the future. Error: {}", metadataKey, exception.getMessage());
                                 } else {
                                     log.debug("Successfully published tombstone for key: {}", metadataKey);
+                                    tombstoneResults[0] = true;
+
+                                    // Remove from index only after both tombstones are published
+                                    if (tombstoneResults[1]) {
+                                        remotePartitionMetadataStore.removeFromEndOffsetIndex(
+                                                topicIdPartition,
+                                                segmentMetadataUpdate.endOffset(),
+                                                segmentMetadataUpdate.brokerLeaderEpoch(),
+                                                metadataKey);
+                                    }
                                 }
                             });
 
                     producerManager.publishTombstone(topicIdPartition, metadataKey + REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX)
                             .whenComplete((metadata, exception) -> {
                                 if (exception != null) {
-                                    log.warn("Failed to publish tombstone for key: {}+" + REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX + ". This is non-critical and compaction " +
-                                            "will eventually clean up the record by the RemoteLogMetadataCleanupManager. Error: {}", metadataKey, exception.getMessage());
+                                    log.warn("Failed to publish tombstone for key: {}{}. This is non-critical and " +
+                                            "will be retried in the future. Error: {}", metadataKey, REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX, exception.getMessage());
                                 } else {
-                                    log.debug("Successfully published tombstone for key: {}", metadataKey);
+                                    log.debug("Successfully published tombstone for key: {}{}", metadataKey, REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX);
+                                    tombstoneResults[1] = true;
+
+                                    // Remove from index only after both tombstones are published
+                                    if (tombstoneResults[0]) {
+                                        remotePartitionMetadataStore.removeFromEndOffsetIndex(
+                                                topicIdPartition,
+                                                segmentMetadataUpdate.endOffset(),
+                                                segmentMetadataUpdate.brokerLeaderEpoch(),
+                                                metadataKey);
+                                    }
                                 }
                             });
                 }

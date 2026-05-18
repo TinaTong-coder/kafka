@@ -192,6 +192,32 @@ public class RemoteLogMetadataCache {
         return matchingSegments;
     }
 
+    /**
+     * Removes a metadata key from the endOffsetToSegments index.
+     * If the brokerLeaderEpoch set becomes empty after removal, it is also removed.
+     * If the endOffset map becomes empty after removal, it is also removed.
+     *
+     * @param endOffset the end offset
+     * @param brokerLeaderEpoch the broker leader epoch
+     * @param metadataKey the metadata key to remove from the index
+     */
+    public void removeFromEndOffsetIndex(long endOffset, int brokerLeaderEpoch, String metadataKey) {
+        ConcurrentMap<Integer, Set<String>> epochMap = endOffsetToSegments.get(endOffset);
+        if (epochMap != null) {
+            Set<String> keySet = epochMap.get(brokerLeaderEpoch);
+            if (keySet != null) {
+                keySet.remove(metadataKey);
+                // Clean up empty collections
+                if (keySet.isEmpty()) {
+                    epochMap.remove(brokerLeaderEpoch);
+                    if (epochMap.isEmpty()) {
+                        endOffsetToSegments.remove(endOffset);
+                    }
+                }
+            }
+        }
+    }
+
     private RemoteLogSegmentMetadata getSegmentMetadata(int leaderEpoch, long offset) {
         RemoteLogLeaderEpochState remoteLogLeaderEpochState = leaderEpochEntries.get(leaderEpoch);
         if (remoteLogLeaderEpochState != null) {
@@ -378,11 +404,15 @@ public class RemoteLogMetadataCache {
         long endOffset = remoteLogSegmentMetadata.endOffset();
         int brokerLeaderEpoch = remoteLogSegmentMetadata.brokerLeaderEpoch();
 
-        ConcurrentMap<Integer, Set<String>> epochMap =
-                endOffsetToSegments.computeIfAbsent(endOffset, k -> new ConcurrentHashMap<>());
+        // Only add to endOffsetToSegments index if brokerLeaderEpoch is valid (not -1)
+        // Old version messages have brokerLeaderEpoch=-1 and null keys, which should not be indexed
+        if (brokerLeaderEpoch != -1) {
+            ConcurrentMap<Integer, Set<String>> epochMap =
+                    endOffsetToSegments.computeIfAbsent(endOffset, k -> new ConcurrentHashMap<>());
 
-        epochMap.computeIfAbsent(brokerLeaderEpoch, k -> ConcurrentHashMap.newKeySet())
-                .add(remoteLogSegmentMetadata.metadataKey());
+            epochMap.computeIfAbsent(brokerLeaderEpoch, k -> ConcurrentHashMap.newKeySet())
+                    .add(remoteLogSegmentMetadata.metadataKey());
+        }
 
         idToSegmentMetadata.put(remoteLogSegmentId, remoteLogSegmentMetadata);
     }
