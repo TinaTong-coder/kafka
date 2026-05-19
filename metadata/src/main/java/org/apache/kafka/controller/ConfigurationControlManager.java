@@ -843,26 +843,33 @@ public class ConfigurationControlManager {
         // Check current configuration
         String currentPolicy = configs.get(TopicConfig.CLEANUP_POLICY_CONFIG);
         String currentRetentionMs = configs.get(TopicConfig.RETENTION_MS_CONFIG);
+        String currentMinCompactionLagMs = configs.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
+        String currentSegmentMs = configs.get(TopicConfig.SEGMENT_MS_CONFIG);
 
         // Target configuration for version 1: compact,delete with infinite retention (-1)
         String targetCleanupPolicy = TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE;
         String targetRetentionMs = String.valueOf(-1L); // -1 means infinite retention
+        String targetMinCompactionLagMs = String.valueOf(1209600000L); // 14 days in milliseconds
+        String targetSegmentMs = String.valueOf(7 * 24 * 60 * 60 * 1000L); // 7 days in milliseconds
 
         boolean needsCleanupPolicyUpdate = currentPolicy == null ||
             !(currentPolicy.contains(TopicConfig.CLEANUP_POLICY_COMPACT) &&
               currentPolicy.contains(TopicConfig.CLEANUP_POLICY_DELETE));
 
         boolean needsRetentionUpdate = !targetRetentionMs.equals(currentRetentionMs);
+        boolean needsMinCompactionLagUpdate = !targetMinCompactionLagMs.equals(currentMinCompactionLagMs);
+        boolean needsSegmentMsUpdate = !targetSegmentMs.equals(currentSegmentMs);
 
-        if (!needsCleanupPolicyUpdate && !needsRetentionUpdate) {
-            log.info("Topic {} already has correct configuration (cleanup.policy={}, retention.ms={}).",
-                topicName, currentPolicy, currentRetentionMs);
+        if (!needsCleanupPolicyUpdate && !needsRetentionUpdate && !needsMinCompactionLagUpdate && !needsSegmentMsUpdate) {
+            log.info("Topic {} already has correct configuration (cleanup.policy={}, retention.ms={}, min.compaction.lag.ms={}, segment.ms={}).",
+                topicName, currentPolicy, currentRetentionMs, currentMinCompactionLagMs, currentSegmentMs);
             return List.of();
         }
 
-        log.info("Updating topic {} configuration. Current: cleanup.policy='{}', retention.ms='{}'. " +
-                 "Target: cleanup.policy='{}', retention.ms='{}'",
-                 topicName, currentPolicy, currentRetentionMs, targetCleanupPolicy, targetRetentionMs);
+        log.info("Updating topic {} configuration. Current: cleanup.policy='{}', retention.ms='{}', min.compaction.lag.ms='{}', segment.ms='{}'. " +
+                 "Target: cleanup.policy='{}', retention.ms='{}', min.compaction.lag.ms='{}', segment.ms='{}'",
+                 topicName, currentPolicy, currentRetentionMs, currentMinCompactionLagMs, currentSegmentMs,
+                 targetCleanupPolicy, targetRetentionMs, targetMinCompactionLagMs, targetSegmentMs);
 
         // Create ConfigRecords for the updates needed
         List<ApiMessageAndVersion> records = new ArrayList<>();
@@ -883,6 +890,24 @@ public class ConfigurationControlManager {
                 .setName(TopicConfig.RETENTION_MS_CONFIG)
                 .setValue(targetRetentionMs);
             records.add(new ApiMessageAndVersion(retentionRecord, (short) 0));
+        }
+
+        if (needsMinCompactionLagUpdate) {
+            ConfigRecord minCompactionLagRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG)
+                .setValue(targetMinCompactionLagMs);
+            records.add(new ApiMessageAndVersion(minCompactionLagRecord, (short) 0));
+        }
+
+        if (needsSegmentMsUpdate) {
+            ConfigRecord segmentMsRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.SEGMENT_MS_CONFIG)
+                .setValue(targetSegmentMs);
+            records.add(new ApiMessageAndVersion(segmentMsRecord, (short) 0));
         }
 
         return records;
