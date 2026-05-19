@@ -160,6 +160,9 @@ public class FeatureCommand {
         upgradeParser.addArgument("--dry-run")
                 .help("Validate this upgrade, but do not perform it.")
                 .action(storeTrue());
+        upgradeParser.addArgument("--validated")
+                .help("Confirm that validation has been performed (required for remote.log.storage.version=2 upgrade).")
+                .action(storeTrue());
 
     }
 
@@ -294,6 +297,7 @@ public class FeatureCommand {
         String metadata = namespace.getString("metadata");
         List<String> features = namespace.getList("feature");
         String releaseVersion = namespace.getString("release_version");
+        boolean validated = namespace.getBoolean("validated") != null && namespace.getBoolean("validated");
 
         if (releaseVersion != null && (metadata != null || features != null)) {
             throw new TerseException("Can not specify `release-version` with other feature flags.");
@@ -341,6 +345,21 @@ public class FeatureCommand {
                         throw new RuntimeException("Feature " + nameAndLevel[0] + " was specified more than once.");
                     }
                 });
+            }
+        }
+
+        // Check if upgrading remote.log.storage.version to 2
+        if (upgradeType == FeatureUpdate.UpgradeType.UPGRADE &&
+            updates.containsKey("remote.log.storage.version") &&
+            updates.get("remote.log.storage.version").maxVersionLevel() >= 2) {
+
+            if (!validated) {
+                throw new TerseException(
+                    "Upgrading to remote.log.storage.version=2 requires the --validated flag.\n" +
+                    "Before upgrading, you must run:\n" +
+                    "  kafka-remote-log-metadata-migration.sh --bootstrap-server <servers> --check\n" +
+                    "This tool verifies that no null-key messages exist in the __remote_log_metadata topic.\n" +
+                    "After validation passes, re-run this command with --validated flag.");
             }
         }
 

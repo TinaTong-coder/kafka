@@ -47,6 +47,7 @@ import org.slf4j.Logger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -768,7 +769,15 @@ public class ConfigurationControlManager {
             }
 
             // Handle remote log metadata topic compaction for RemoteLogStorageVersion
-            if (updates.getOrDefault(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME, (short) 0) >= 1) {
+            short remoteLogStorageVersion = updates.getOrDefault(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME, (short) 0);
+
+            if (remoteLogStorageVersion >= 2) {
+                // Upgrading to version 2: remove min.compaction.lag.ms
+                // Note: Users must pass --validated flag to kafka-features.sh after running validation tool
+                logValidationReminder();
+                additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicV2ConfigRecords());
+            } else if (remoteLogStorageVersion >= 1) {
+                // Upgrading to version 1: enable compaction
                 additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicConfigRecords());
             }
 
@@ -911,5 +920,65 @@ public class ConfigurationControlManager {
         }
 
         return records;
+    }
+
+    /**
+     * Generates ConfigRecords to remove the min.compaction.lag.ms override from the __remote_log_metadata topic.
+     * This is called when the remote.log.storage.version feature is being upgraded from level 1 to level 2.
+     *
+     * Version 2 removes the conservative min.compaction.lag.ms setting (14 days) that was set in version 1,
+     * allowing the topic to use the default value for more aggressive compaction.
+     *
+     * This should only be called after validating that no null-key messages remain in the topic,
+     * as those messages cannot be compacted and would cause issues.
+     *
+     * @return List of ConfigRecords if updates are needed, empty list otherwise
+     */
+    List<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicV2ConfigRecords() {
+        String topicName = "__remote_log_metadata";
+        ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
+
+        // Check if topic configuration exists
+        TimelineHashMap<String, String> configs = configData.get(topicResource);
+        if (configs == null) {
+            log.info("Topic {} does not exist yet. It will be created with appropriate config when needed.", topicName);
+            return List.of();
+        }
+
+        // Check current configuration
+        String currentMinCompactionLagMs = configs.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
+
+        // If min.compaction.lag.ms is not set or already removed, no action needed
+        if (currentMinCompactionLagMs == null) {
+            log.info("Topic {} already has min.compaction.lag.ms unset (using default).", topicName);
+            return List.of();
+        }
+
+        log.info("Removing min.compaction.lag.ms override from topic {}. Current value: '{}', will revert to default.",
+                 topicName, currentMinCompactionLagMs);
+
+        // Create ConfigRecord to remove the min.compaction.lag.ms setting
+        // Setting value to null removes the config override
+        List<ApiMessageAndVersion> records = new ArrayList<>();
+        ConfigRecord minCompactionLagRecord = new ConfigRecord()
+            .setResourceType(Type.TOPIC.id())
+            .setResourceName(topicName)
+            .setName(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG)
+            .setValue(null);
+        records.add(new ApiMessageAndVersion(minCompactionLagRecord, (short) 0));
+
+        return records;
+    }
+
+    /**
+     * Logs a reminder to validate the __remote_log_metadata topic before upgrading to version 2.
+     *
+     * Note: Actual validation is enforced by requiring users to pass the --validated flag
+     * when running kafka-features.sh upgrade command. This method just logs informational message.
+     */
+    void logValidationReminder() {
+        log.info("Upgrading to remote.log.storage.version=2. " +
+                 "Ensure you have run 'kafka-remote-log-metadata-migration.sh --check' " +
+                 "to verify no null-key messages exist in __remote_log_metadata topic.");
     }
 }
