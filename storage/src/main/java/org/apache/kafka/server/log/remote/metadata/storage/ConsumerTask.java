@@ -173,7 +173,7 @@ class ConsumerTask implements Runnable, Closeable {
 
             // Parse the tombstone key to extract metadata and trigger cleanup
             if (record.key() != null) {
-                String key = new String(record.key());
+                String key = new String(record.key(), java.nio.charset.StandardCharsets.UTF_8);
                 // Remove the :UPDATE suffix if present
                 final String baseKey = key.endsWith(":UPDATE")
                         ? key.substring(0, key.length() - ":UPDATE".length())
