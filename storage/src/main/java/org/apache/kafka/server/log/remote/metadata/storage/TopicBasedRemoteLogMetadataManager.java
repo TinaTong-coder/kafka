@@ -174,16 +174,7 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
                     String metadataKey = toBeTombstonedKeys.next();
 
                     // Fire-and-forget: send tombstones but don't wait for completion
-                    producerManager.publishTombstone(topicIdPartition, metadataKey)
-                            .whenComplete((metadata, exception) -> {
-                                if (exception != null) {
-                                    log.warn("Failed to publish tombstone for key: {}. This is non-critical and " +
-                                            "will be retried in the future. Error: {}", metadataKey, exception.getMessage());
-                                } else {
-                                    log.debug("Successfully published tombstone for key: {}", metadataKey);
-                                }
-                            });
-
+                    // First tombstone the update key, then tombstone the metadata key
                     producerManager.publishTombstone(topicIdPartition, metadataKey + REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX)
                             .whenComplete((metadata, exception) -> {
                                 if (exception != null) {
@@ -191,6 +182,17 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
                                             "will be retried in the future. Error: {}", metadataKey, REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX, exception.getMessage());
                                 } else {
                                     log.debug("Successfully published tombstone for key: {}{}", metadataKey, REMOTE_LOG_METADATA_UPDATE_KEY_SUFFIX);
+
+                                    // After update key tombstone succeeds, tombstone the metadata key
+                                    producerManager.publishTombstone(topicIdPartition, metadataKey)
+                                            .whenComplete((metadata2, exception2) -> {
+                                                if (exception2 != null) {
+                                                    log.warn("Failed to publish tombstone for key: {}. This is non-critical and " +
+                                                            "will be retried in the future. Error: {}", metadataKey, exception2.getMessage());
+                                                } else {
+                                                    log.debug("Successfully published tombstone for key: {}", metadataKey);
+                                                }
+                                            });
                                 }
                             });
                 }

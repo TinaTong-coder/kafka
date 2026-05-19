@@ -769,7 +769,7 @@ public class ConfigurationControlManager {
 
             // Handle remote log metadata topic compaction for RemoteLogStorageVersion
             if (updates.getOrDefault(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME, (short) 0) >= 1) {
-                maybeGenerateRemoteLogMetadataTopicCompactionRecord().ifPresent(additionalRecords::add);
+                additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicConfigRecords());
             }
 
             if (!additionalRecords.isEmpty()) {
@@ -820,41 +820,71 @@ public class ConfigurationControlManager {
     }
 
     /**
-     * Generates a ConfigRecord to update the __remote_log_metadata topic to use compaction cleanup policy.
+     * Generates ConfigRecords to update the __remote_log_metadata topic to use compaction and deletion
+     * cleanup policy with 30-minute retention.
      * This is called when the remote.log.storage.version feature is being upgraded to level 1 or higher.
      *
-     * The method checks if the topic exists and if it already has compaction enabled.
-     * If an update is needed, it returns an ApiMessageAndVersion containing the ConfigRecord.
+     * The method checks if the topic exists and if it already has the correct configuration.
+     * If updates are needed, it returns a list of ApiMessageAndVersion containing the ConfigRecords.
      *
-     * @return Optional containing the ConfigRecord if update is needed, empty otherwise
+     * @return List of ConfigRecords if updates are needed, empty list otherwise
      */
-    Optional<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicCompactionRecord() {
+    List<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicConfigRecords() {
         String topicName = "__remote_log_metadata";
         ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
 
         // Check if topic configuration exists
         TimelineHashMap<String, String> configs = configData.get(topicResource);
         if (configs == null) {
-            log.info("Topic {} does not exist yet. It will be created with compaction when needed.", topicName);
-            return Optional.empty();
+            log.info("Topic {} does not exist yet. It will be created with appropriate config when needed.", topicName);
+            return List.of();
         }
 
-        // Check current cleanup policy
+        // Check current configuration
         String currentPolicy = configs.get(TopicConfig.CLEANUP_POLICY_CONFIG);
-        if (currentPolicy != null && currentPolicy.contains(TopicConfig.CLEANUP_POLICY_COMPACT)) {
-            log.info("Topic {} already uses compaction cleanup policy.", topicName);
-            return Optional.empty();
+        String currentRetentionMs = configs.get(TopicConfig.RETENTION_MS_CONFIG);
+
+        // Target configuration for version 1: compact,delete with infinite retention (-1)
+        String targetCleanupPolicy = TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE;
+        String targetRetentionMs = String.valueOf(-1L); // -1 means infinite retention
+
+        boolean needsCleanupPolicyUpdate = currentPolicy == null ||
+            !(currentPolicy.contains(TopicConfig.CLEANUP_POLICY_COMPACT) &&
+              currentPolicy.contains(TopicConfig.CLEANUP_POLICY_DELETE));
+
+        boolean needsRetentionUpdate = !targetRetentionMs.equals(currentRetentionMs);
+
+        if (!needsCleanupPolicyUpdate && !needsRetentionUpdate) {
+            log.info("Topic {} already has correct configuration (cleanup.policy={}, retention.ms={}).",
+                topicName, currentPolicy, currentRetentionMs);
+            return List.of();
         }
 
-        log.info("Generating ConfigRecord to update topic {} cleanup policy from '{}' to compact.", topicName, currentPolicy);
+        log.info("Updating topic {} configuration. Current: cleanup.policy='{}', retention.ms='{}'. " +
+                 "Target: cleanup.policy='{}', retention.ms='{}'",
+                 topicName, currentPolicy, currentRetentionMs, targetCleanupPolicy, targetRetentionMs);
 
-        // Create a ConfigRecord to update the cleanup policy
-        ConfigRecord configRecord = new ConfigRecord()
-            .setResourceType(Type.TOPIC.id())
-            .setResourceName(topicName)
-            .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
-            .setValue(TopicConfig.CLEANUP_POLICY_COMPACT);
+        // Create ConfigRecords for the updates needed
+        List<ApiMessageAndVersion> records = new ArrayList<>();
 
-        return Optional.of(new ApiMessageAndVersion(configRecord, (short) 0));
+        if (needsCleanupPolicyUpdate) {
+            ConfigRecord cleanupPolicyRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
+                .setValue(targetCleanupPolicy);
+            records.add(new ApiMessageAndVersion(cleanupPolicyRecord, (short) 0));
+        }
+
+        if (needsRetentionUpdate) {
+            ConfigRecord retentionRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.RETENTION_MS_CONFIG)
+                .setValue(targetRetentionMs);
+            records.add(new ApiMessageAndVersion(retentionRecord, (short) 0));
+        }
+
+        return records;
     }
 }
