@@ -20,6 +20,8 @@ import org.apache.kafka.clients.admin.Admin;
 import org.apache.kafka.clients.admin.AlterConfigOp;
 import org.apache.kafka.clients.admin.Config;
 import org.apache.kafka.clients.admin.ConfigEntry;
+import org.apache.kafka.clients.admin.FeatureUpdate;
+import org.apache.kafka.clients.admin.UpdateFeaturesOptions;
 import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
@@ -27,7 +29,8 @@ import org.apache.kafka.clients.consumer.KafkaConsumer;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
-import org.apache.kafka.common.utils.Exit;
+import org.apache.kafka.common.utils.Utils;
+import org.apache.kafka.common.utils.internals.Exit;
 
 import net.sourceforge.argparse4j.ArgumentParsers;
 import net.sourceforge.argparse4j.impl.Arguments;
@@ -105,6 +108,10 @@ public class RemoteLogMetadataMigrationTool {
             .action(Arguments.storeTrue())
             .help("Check if the topic contains any messages with null keys. This is required before upgrading to version 2.");
 
+        parser.addArgument("--auto-upgrade")
+            .action(Arguments.storeTrue())
+            .help("Automatically upgrade to remote.log.storage.version=2 if validation passes. Requires --check.");
+
         parser.addArgument("--timeout-ms")
             .type(Long.class)
             .setDefault(60000L)
@@ -115,37 +122,49 @@ public class RemoteLogMetadataMigrationTool {
         String bootstrapServers = namespace.getString("bootstrap_server");
         String commandConfig = namespace.getString("command_config");
         boolean check = namespace.getBoolean("check");
+        boolean autoUpgrade = namespace.getBoolean("auto_upgrade");
         long timeoutMs = namespace.getLong("timeout_ms");
 
         Properties props = new Properties();
         if (commandConfig != null) {
-            props = org.apache.kafka.server.util.CommandLineUtils.loadPropsFromFile(commandConfig);
+            try {
+                props = Utils.loadProps(commandConfig);
+            } catch (java.io.IOException e) {
+                throw new TerseException("Failed to load properties from file: " + commandConfig + ". Error: " + e.getMessage());
+            }
+        }
+
+        if (autoUpgrade && !check) {
+            throw new TerseException("--auto-upgrade requires --check to be specified.");
         }
 
         if (check) {
-            checkForNullKeyMessages(bootstrapServers, props, timeoutMs);
+            checkForNullKeyMessages(bootstrapServers, props, timeoutMs, autoUpgrade);
         } else {
             throw new TerseException("No operation specified. Use --check to validate the topic.");
         }
     }
 
-    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs) throws Exception {
-        Properties props = new Properties();
-        props.putAll(baseProps);
-        props.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        props.put(ConsumerConfig.GROUP_ID_CONFIG, "remote-log-metadata-migration-tool-" + System.currentTimeMillis());
-        props.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        props.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        props.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        props.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        props.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
+    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean autoUpgrade) throws Exception {
+        Properties consumerProps = new Properties();
+        consumerProps.putAll(baseProps);
+        consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "remote-log-metadata-migration-tool-" + System.currentTimeMillis());
+        consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+        consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+        consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        consumerProps.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
 
         System.out.println("Checking __remote_log_metadata topic for messages with null keys...");
         System.out.println("Bootstrap servers: " + bootstrapServers);
         System.out.println("Timeout: " + timeoutMs + "ms");
+        if (autoUpgrade) {
+            System.out.println("Auto-upgrade: ENABLED (will upgrade to version 2 if validation passes)");
+        }
         System.out.println();
 
-        try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(props)) {
+        try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProps)) {
             // Get all partitions of the metadata topic
             List<TopicPartition> partitions = consumer.partitionsFor(METADATA_TOPIC)
                 .stream()
@@ -220,9 +239,70 @@ public class RemoteLogMetadataMigrationTool {
                 System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
                 System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
                 System.out.println();
-                System.out.println("To upgrade, run:");
-                System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
+
+                if (autoUpgrade) {
+                    performAutoUpgrade(bootstrapServers, baseProps);
+                } else {
+                    System.out.println("To upgrade, run:");
+                    System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
+                    System.out.println();
+                    System.out.println("Or run this tool with --auto-upgrade to automatically upgrade:");
+                    System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --auto-upgrade");
+                }
             }
+        }
+    }
+
+    private static void performAutoUpgrade(String bootstrapServers, Properties baseProps) throws Exception {
+        System.out.println("Initiating automatic upgrade to remote.log.storage.version=2...");
+        System.out.println();
+
+        Properties adminProps = new Properties();
+        adminProps.putAll(baseProps);
+        adminProps.put("bootstrap.servers", bootstrapServers);
+
+        try (Admin admin = Admin.create(adminProps)) {
+            // First, check current version
+            org.apache.kafka.clients.admin.FeatureMetadata featureMetadata =
+                admin.describeFeatures().featureMetadata().get();
+
+            org.apache.kafka.clients.admin.FinalizedVersionRange versionRange =
+                featureMetadata.finalizedFeatures().get(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME);
+
+            short currentVersion = (versionRange != null) ? versionRange.maxVersionLevel() : 0;
+
+            System.out.println("Current remote.log.storage.version: " + currentVersion);
+
+            if (currentVersion == 0) {
+                throw new TerseException(
+                    "Cannot upgrade directly from version 0 to version 2. " +
+                    "Must upgrade to version 1 first using: " +
+                    "kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=1");
+            }
+
+            if (currentVersion == 2) {
+                System.out.println("ℹ️  Already at version 2. No upgrade needed.");
+                return;
+            }
+
+            if (currentVersion != 1) {
+                throw new TerseException("Unexpected current version: " + currentVersion + ". Expected version 1.");
+            }
+
+            // Perform the upgrade from 1 to 2
+            System.out.println("Upgrading from version 1 to version 2...");
+            Map<String, FeatureUpdate> updates = new HashMap<>();
+            updates.put(
+                org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME,
+                new FeatureUpdate((short) 2, FeatureUpdate.UpgradeType.UPGRADE)
+            );
+
+            admin.updateFeatures(updates, new UpdateFeaturesOptions()).all().get();
+
+            System.out.println();
+            System.out.println("✅ Successfully upgraded to remote.log.storage.version=2!");
+            System.out.println();
+            System.out.println("The __remote_log_metadata topic will now use optimized compaction settings.");
         }
     }
 }
