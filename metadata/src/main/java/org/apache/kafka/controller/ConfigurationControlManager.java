@@ -772,8 +772,8 @@ public class ConfigurationControlManager {
             short remoteLogStorageVersion = updates.getOrDefault(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME, (short) 0);
 
             if (remoteLogStorageVersion >= 2) {
-                // Upgrading to version 2: remove min.compaction.lag.ms
-                // Note: Users must pass --validated flag to kafka-features.sh after running validation tool
+                // Upgrading to version 2: change to compact-only and remove overrides
+                // Note: Users should run RemoteLogMetadataMigrationTool --check before upgrading
                 logValidationReminder();
                 additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicV2ConfigRecords());
             } else if (remoteLogStorageVersion >= 1) {
@@ -923,14 +923,20 @@ public class ConfigurationControlManager {
     }
 
     /**
-     * Generates ConfigRecords to remove the min.compaction.lag.ms override from the __remote_log_metadata topic.
+     * Generates ConfigRecords to update the __remote_log_metadata topic configuration for version 2.
      * This is called when the remote.log.storage.version feature is being upgraded from level 1 to level 2.
      *
-     * Version 2 removes the conservative min.compaction.lag.ms setting (14 days) that was set in version 1,
-     * allowing the topic to use the default value for more aggressive compaction.
+     * Version 2 changes:
+     * 1. Changes cleanup.policy to "compact" (removes "delete") - topic becomes compact-only
+     * 2. Removes min.compaction.lag.ms override - no longer needed, uses broker default
+     * 3. Removes retention.ms override - compact-only topics don't use time-based retention
+     *
+     * In version 1, the topic used "compact,delete" policy with retention.ms and min.compaction.lag.ms
+     * to safely handle the migration from old-format (null-key) messages. Version 2 transitions to
+     * compact-only policy since all messages now have proper keys.
      *
      * This should only be called after validating that no null-key messages remain in the topic,
-     * as those messages cannot be compacted and would cause issues.
+     * as those messages cannot be compacted and would cause issues in a compact-only topic.
      *
      * @return List of ConfigRecords if updates are needed, empty list otherwise
      */
@@ -946,26 +952,57 @@ public class ConfigurationControlManager {
         }
 
         // Check current configuration
+        String currentCleanupPolicy = configs.get(TopicConfig.CLEANUP_POLICY_CONFIG);
         String currentMinCompactionLagMs = configs.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
+        String currentRetentionMs = configs.get(TopicConfig.RETENTION_MS_CONFIG);
 
-        // If min.compaction.lag.ms is not set or already removed, no action needed
-        if (currentMinCompactionLagMs == null) {
-            log.info("Topic {} already has min.compaction.lag.ms unset (using default).", topicName);
+        // Target configuration for version 2: compact-only
+        String targetCleanupPolicy = TopicConfig.CLEANUP_POLICY_COMPACT;
+
+        boolean needsCleanupPolicyUpdate = !targetCleanupPolicy.equals(currentCleanupPolicy);
+        boolean needsMinCompactionLagRemoval = currentMinCompactionLagMs != null;
+        boolean needsRetentionMsRemoval = currentRetentionMs != null;
+
+        if (!needsCleanupPolicyUpdate && !needsMinCompactionLagRemoval && !needsRetentionMsRemoval) {
+            log.info("Topic {} already has correct version 2 configuration (cleanup.policy=compact, min.compaction.lag.ms unset, retention.ms unset).", topicName);
             return List.of();
         }
 
-        log.info("Removing min.compaction.lag.ms override from topic {}. Current value: '{}', will revert to default.",
-                 topicName, currentMinCompactionLagMs);
+        log.info("Updating topic {} configuration for version 2. Current: cleanup.policy='{}', min.compaction.lag.ms='{}', retention.ms='{}'. " +
+                 "Target: cleanup.policy='{}', min.compaction.lag.ms unset, retention.ms unset",
+                 topicName, currentCleanupPolicy, currentMinCompactionLagMs, currentRetentionMs, targetCleanupPolicy);
 
-        // Create ConfigRecord to remove the min.compaction.lag.ms setting
-        // Setting value to null removes the config override
+        // Create ConfigRecords for the updates needed
         List<ApiMessageAndVersion> records = new ArrayList<>();
-        ConfigRecord minCompactionLagRecord = new ConfigRecord()
-            .setResourceType(Type.TOPIC.id())
-            .setResourceName(topicName)
-            .setName(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG)
-            .setValue(null);
-        records.add(new ApiMessageAndVersion(minCompactionLagRecord, (short) 0));
+
+        if (needsCleanupPolicyUpdate) {
+            ConfigRecord cleanupPolicyRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
+                .setValue(targetCleanupPolicy);
+            records.add(new ApiMessageAndVersion(cleanupPolicyRecord, (short) 0));
+        }
+
+        if (needsMinCompactionLagRemoval) {
+            // Setting value to null removes the config override
+            ConfigRecord minCompactionLagRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG)
+                .setValue(null);
+            records.add(new ApiMessageAndVersion(minCompactionLagRecord, (short) 0));
+        }
+
+        if (needsRetentionMsRemoval) {
+            // Setting value to null removes the config override
+            ConfigRecord retentionMsRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.RETENTION_MS_CONFIG)
+                .setValue(null);
+            records.add(new ApiMessageAndVersion(retentionMsRecord, (short) 0));
+        }
 
         return records;
     }
