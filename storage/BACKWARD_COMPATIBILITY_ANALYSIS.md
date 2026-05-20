@@ -88,14 +88,25 @@ Result:
 kafka-remote-log-metadata-migration.sh \
   --bootstrap-server localhost:9092 \
   --check \
-  --auto-upgrade
+  --upgrade-to-v2
 ```
 Result:
 - Tool displays retention reminder and checks if enough time has passed
 - Scans topic for null-key messages
+- Records last null-key message timestamp and suggests retry time if validation fails
 - If validation passes:
   - Feature: `remote.log.storage.version=2`
   - Topic config: `cleanup.policy=compact` (min.compaction.lag.ms and retention.ms overrides removed)
+
+**Force Upgrade (Not Recommended)**:
+```bash
+kafka-remote-log-metadata-migration.sh \
+  --bootstrap-server localhost:9092 \
+  --check \
+  --upgrade-to-v2 \
+  --force
+```
+Use `--force` to upgrade even if null-key messages exist. **Warning**: Null-key messages will be lost during compaction.
 
 ### Scenario 3: Existing Cluster Enabling Tiered Storage for First Time
 ```bash
@@ -153,14 +164,17 @@ kafka-remote-log-metadata-migration.sh \
 kafka-remote-log-metadata-migration.sh \
   --bootstrap-server localhost:9092 \
   --check \
-  --auto-upgrade
+  --upgrade-to-v2
 ```
 
 ### Safety Features
 - Validates current version before upgrade
 - Scans entire topic for null-key messages
+- Records last null-key message timestamp
+- Calculates message age and suggests retry time
 - Displays retention period reminder before validation
-- Only upgrades if no null-key messages found
+- Only upgrades if no null-key messages found (unless `--force` is used)
+- `--force` flag available to bypass validation (use with caution)
 
 ## Compatibility
 

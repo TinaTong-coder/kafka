@@ -77,7 +77,10 @@ import java.util.concurrent.atomic.AtomicLong;
  *   kafka-remote-log-metadata-migration.sh --bootstrap-server localhost:9092 --upgrade-to-v1 --retention-ms 1209600000
  *
  *   # Upgrade from version 1 to 2 (with validation)
- *   kafka-remote-log-metadata-migration.sh --bootstrap-server localhost:9092 --check --auto-upgrade
+ *   kafka-remote-log-metadata-migration.sh --bootstrap-server localhost:9092 --check --upgrade-to-v2
+ *
+ *   # Force upgrade to version 2 (skip validation)
+ *   kafka-remote-log-metadata-migration.sh --bootstrap-server localhost:9092 --check --upgrade-to-v2 --force
  *
  * Exit codes:
  *   0 - Success (no null-key messages found, or operation completed successfully)
@@ -133,9 +136,13 @@ public class RemoteLogMetadataMigrationTool {
             .action(Arguments.storeTrue())
             .help("Check if the topic contains any messages with null keys. This is required before upgrading to version 2.");
 
-        parser.addArgument("--auto-upgrade")
+        parser.addArgument("--upgrade-to-v2")
             .action(Arguments.storeTrue())
-            .help("Automatically upgrade to remote.log.storage.version=2 if validation passes. Requires --check.");
+            .help("Upgrade to remote.log.storage.version=2 after validation. Requires --check.");
+
+        parser.addArgument("--force")
+            .action(Arguments.storeTrue())
+            .help("Force upgrade to version 2 even if null-key messages are found. Use with caution: null-key messages will be lost during compaction.");
 
         parser.addArgument("--retention-ms")
             .type(Long.class)
@@ -159,7 +166,8 @@ public class RemoteLogMetadataMigrationTool {
         String commandConfig = namespace.getString("command_config");
         boolean upgradeToV1 = namespace.getBoolean("upgrade_to_v1");
         boolean check = namespace.getBoolean("check");
-        boolean autoUpgrade = namespace.getBoolean("auto_upgrade");
+        boolean upgradeToV2 = namespace.getBoolean("upgrade_to_v2");
+        boolean force = namespace.getBoolean("force");
         long retentionMs = namespace.getLong("retention_ms");
         long timeoutMs = namespace.getLong("timeout_ms");
 
@@ -172,18 +180,22 @@ public class RemoteLogMetadataMigrationTool {
             }
         }
 
-        if (autoUpgrade && !check) {
-            throw new TerseException("--auto-upgrade requires --check to be specified.");
+        if (upgradeToV2 && !check) {
+            throw new TerseException("--upgrade-to-v2 requires --check to be specified.");
+        }
+
+        if (force && !upgradeToV2) {
+            throw new TerseException("--force can only be used with --upgrade-to-v2.");
         }
 
         if (upgradeToV1 && check) {
-            throw new TerseException("Cannot specify both --upgrade-to-v1 and --check. Use --upgrade-to-v1 for 0->1 upgrade, or --check for 1->2 upgrade.");
+            throw new TerseException("Cannot specify both --upgrade-to-v1 and --check. Use --upgrade-to-v1 for 0->1 upgrade, or --check for 1->2 validation.");
         }
 
         if (upgradeToV1) {
             performUpgradeToV1(bootstrapServers, props, retentionMs);
         } else if (check) {
-            checkForNullKeyMessages(bootstrapServers, props, timeoutMs, autoUpgrade);
+            checkForNullKeyMessages(bootstrapServers, props, timeoutMs, upgradeToV2, force);
         } else {
             throw new TerseException("No operation specified. Use --upgrade-to-v1 for version 0->1 upgrade, or --check for version 1->2 validation.");
         }
@@ -287,7 +299,7 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean autoUpgrade) throws Exception {
+    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean upgradeToV2, boolean force) throws Exception {
         // First, check the current topic configuration to remind users about the retention period
         Properties adminProps = new Properties();
         adminProps.putAll(baseProps);
@@ -346,8 +358,11 @@ public class RemoteLogMetadataMigrationTool {
         System.out.println("Checking __remote_log_metadata topic for messages with null keys...");
         System.out.println("Bootstrap servers: " + bootstrapServers);
         System.out.println("Timeout: " + timeoutMs + "ms");
-        if (autoUpgrade) {
-            System.out.println("Auto-upgrade: ENABLED (will upgrade to version 2 if validation passes)");
+        if (upgradeToV2) {
+            System.out.println("Upgrade to V2: ENABLED (will upgrade to version 2 if validation passes)");
+            if (force) {
+                System.out.println("Force mode: ENABLED (will upgrade even if null-key messages are found)");
+            }
         }
         System.out.println();
 
@@ -370,6 +385,7 @@ public class RemoteLogMetadataMigrationTool {
 
             AtomicLong totalMessages = new AtomicLong(0);
             AtomicLong nullKeyMessages = new AtomicLong(0);
+            long lastNullKeyTimestamp = -1;
             long startTime = System.currentTimeMillis();
             boolean hasMoreRecords = true;
 
@@ -395,6 +411,7 @@ public class RemoteLogMetadataMigrationTool {
 
                         if (record.key() == null) {
                             nullKeyMessages.incrementAndGet();
+                            lastNullKeyTimestamp = Math.max(lastNullKeyTimestamp, record.timestamp());
                             System.out.println("⚠️  Found message with null key at partition=" + record.partition() +
                                 ", offset=" + record.offset() + ", timestamp=" + record.timestamp());
                         }
@@ -416,32 +433,85 @@ public class RemoteLogMetadataMigrationTool {
             if (nullKeyMessages.get() > 0) {
                 System.out.println("❌ VALIDATION FAILED: Found " + nullKeyMessages.get() + " message(s) with null keys.");
                 System.out.println();
+
+                // Display timestamp information and retry suggestion
+                if (lastNullKeyTimestamp > 0) {
+                    long currentTime = System.currentTimeMillis();
+                    long messageAgeMs = currentTime - lastNullKeyTimestamp;
+                    long messageAgeDays = messageAgeMs / (24 * 60 * 60 * 1000L);
+
+                    System.out.println("Last null-key message timestamp: " + lastNullKeyTimestamp);
+                    System.out.println("Last null-key message age: " + messageAgeDays + " days (" + (messageAgeMs / (60 * 60 * 1000L)) + " hours)");
+                    System.out.println();
+
+                    // Get retention.ms to suggest when to retry
+                    try (Admin admin = Admin.create(adminProps)) {
+                        ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
+                        Config topicConfig = admin.describeConfigs(Collections.singleton(topicResource))
+                            .all().get().get(topicResource);
+                        ConfigEntry retentionMsEntry = topicConfig.get(TopicConfig.RETENTION_MS_CONFIG);
+
+                        if (retentionMsEntry != null && retentionMsEntry.value() != null) {
+                            long retentionMs = Long.parseLong(retentionMsEntry.value());
+                            long retentionDays = retentionMs / (24 * 60 * 60 * 1000L);
+                            long remainingMs = retentionMs - messageAgeMs;
+
+                            if (remainingMs > 0) {
+                                long remainingDays = remainingMs / (24 * 60 * 60 * 1000L);
+                                long retryTimestamp = lastNullKeyTimestamp + retentionMs;
+
+                                System.out.println("Topic retention.ms: " + retentionMs + "ms (" + retentionDays + " days)");
+                                System.out.println();
+                                System.out.println("💡 SUGGESTION:");
+                                System.out.println("  Wait approximately " + remainingDays + " more day(s) for null-key messages to expire.");
+                                System.out.println("  Retry this validation after: " + new java.util.Date(retryTimestamp));
+                                System.out.println();
+                            }
+                        }
+                    } catch (Exception e) {
+                        // Ignore errors when trying to get retry suggestion
+                    }
+                }
+
                 System.out.println("Action required:");
-                System.out.println("1. Wait for these messages to expire based on retention.ms setting");
-                System.out.println("2. Or increase retention.ms temporarily to allow more time for old messages to expire");
-                System.out.println("3. Then run this tool again to verify all null-key messages are gone");
-                System.out.println("4. Only then proceed with the upgrade to remote.log.storage.version=2");
-                throw new TerseException("Cannot upgrade to version 2: null-key messages found in " + METADATA_TOPIC);
-            } else {
-                System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
-                System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
+                System.out.println("1. Wait for null-key messages to expire based on retention.ms setting");
+                System.out.println("2. Then run this tool again to verify all null-key messages are gone");
+                System.out.println("3. Only then proceed with the upgrade to remote.log.storage.version=2");
                 System.out.println();
 
-                if (autoUpgrade) {
-                    performAutoUpgrade(bootstrapServers, baseProps);
+                if (force) {
+                    System.out.println("⚠️  WARNING: --force flag is enabled. Proceeding with upgrade despite null-key messages.");
+                    System.out.println("⚠️  These null-key messages will be LOST during compaction!");
+                    System.out.println();
+                } else {
+                    System.out.println("To force upgrade despite null-key messages (NOT RECOMMENDED), use --force flag.");
+                    throw new TerseException("Cannot upgrade to version 2: null-key messages found in " + METADATA_TOPIC);
+                }
+            }
+
+            // If we reach here with force flag, we proceed with upgrade despite null keys
+            if (nullKeyMessages.get() == 0 || force) {
+                if (nullKeyMessages.get() == 0) {
+                    System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
+                    System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
+                    System.out.println();
+                }
+
+                if (upgradeToV2) {
+                    performUpgradeToV2(bootstrapServers, baseProps);
                 } else {
                     System.out.println("To upgrade, run:");
                     System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
                     System.out.println();
-                    System.out.println("Or run this tool with --auto-upgrade to automatically upgrade:");
-                    System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --auto-upgrade");
+                    System.out.println("Or run this tool with --upgrade-to-v2 to automatically upgrade:");
+                    System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2");
                 }
             }
         }
     }
 
-    private static void performAutoUpgrade(String bootstrapServers, Properties baseProps) throws Exception {
-        System.out.println("Initiating automatic upgrade to remote.log.storage.version=2...");
+    private static void performUpgradeToV2(String bootstrapServers, Properties baseProps) throws Exception {
+        System.out.println("Initiating upgrade to remote.log.storage.version=2...");
         System.out.println();
 
         Properties adminProps = new Properties();
