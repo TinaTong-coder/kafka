@@ -297,7 +297,7 @@ public class FeatureCommand {
         String metadata = namespace.getString("metadata");
         List<String> features = namespace.getList("feature");
         String releaseVersion = namespace.getString("release_version");
-        boolean validated = namespace.getBoolean("validated") != null && namespace.getBoolean("validated");
+        boolean validated = Boolean.TRUE.equals(namespace.getBoolean("validated"));
 
         if (releaseVersion != null && (metadata != null || features != null)) {
             throw new TerseException("Can not specify `release-version` with other feature flags.");
