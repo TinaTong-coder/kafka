@@ -221,7 +221,7 @@ public class RemoteLogMetadataMigrationTool {
                 System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
                 System.out.println();
                 System.out.println("To upgrade, run:");
-                System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2 --validated");
+                System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
             }
         }
     }
