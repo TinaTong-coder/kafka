@@ -850,73 +850,32 @@ public class ConfigurationControlManager {
 
         // Check current configuration
         String currentPolicy = configs.get(TopicConfig.CLEANUP_POLICY_CONFIG);
-        String currentRetentionMs = configs.get(TopicConfig.RETENTION_MS_CONFIG);
-        String currentMinCompactionLagMs = configs.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
-        String currentSegmentMs = configs.get(TopicConfig.SEGMENT_MS_CONFIG);
 
-        // Target configuration for version 1: compact,delete with infinite retention (-1)
+        // Target configuration for version 1: compact,delete policy
+        // Note: retention.ms, min.compaction.lag.ms, and segment.ms should be set via migration script
         String targetCleanupPolicy = TopicConfig.CLEANUP_POLICY_COMPACT + "," + TopicConfig.CLEANUP_POLICY_DELETE;
-        String targetRetentionMs = String.valueOf(-1L); // -1 means infinite retention
-        String targetMinCompactionLagMs = String.valueOf(1209600000L); // 14 days in milliseconds
-        String targetSegmentMs = String.valueOf(7 * 24 * 60 * 60 * 1000L); // 7 days in milliseconds
 
         boolean needsCleanupPolicyUpdate = currentPolicy == null ||
             !(currentPolicy.contains(TopicConfig.CLEANUP_POLICY_COMPACT) &&
               currentPolicy.contains(TopicConfig.CLEANUP_POLICY_DELETE));
 
-        boolean needsRetentionUpdate = !targetRetentionMs.equals(currentRetentionMs);
-        boolean needsMinCompactionLagUpdate = !targetMinCompactionLagMs.equals(currentMinCompactionLagMs);
-        boolean needsSegmentMsUpdate = !targetSegmentMs.equals(currentSegmentMs);
-
-        if (!needsCleanupPolicyUpdate && !needsRetentionUpdate && !needsMinCompactionLagUpdate && !needsSegmentMsUpdate) {
-            log.info("Topic {} already has correct configuration (cleanup.policy={}, retention.ms={}, min.compaction.lag.ms={}, segment.ms={}).",
-                topicName, currentPolicy, currentRetentionMs, currentMinCompactionLagMs, currentSegmentMs);
+        if (!needsCleanupPolicyUpdate) {
+            log.info("Topic {} already has correct cleanup.policy configuration: {}",
+                topicName, currentPolicy);
             return List.of();
         }
 
-        log.info("Updating topic {} configuration. Current: cleanup.policy='{}', retention.ms='{}', min.compaction.lag.ms='{}', segment.ms='{}'. " +
-                 "Target: cleanup.policy='{}', retention.ms='{}', min.compaction.lag.ms='{}', segment.ms='{}'",
-                 topicName, currentPolicy, currentRetentionMs, currentMinCompactionLagMs, currentSegmentMs,
-                 targetCleanupPolicy, targetRetentionMs, targetMinCompactionLagMs, targetSegmentMs);
+        log.info("Updating topic {} cleanup.policy configuration. Current: '{}', Target: '{}'",
+                 topicName, currentPolicy, targetCleanupPolicy);
 
-        // Create ConfigRecords for the updates needed
+        // Create ConfigRecord for cleanup.policy update
         List<ApiMessageAndVersion> records = new ArrayList<>();
-
-        if (needsCleanupPolicyUpdate) {
-            ConfigRecord cleanupPolicyRecord = new ConfigRecord()
-                .setResourceType(Type.TOPIC.id())
-                .setResourceName(topicName)
-                .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
-                .setValue(targetCleanupPolicy);
-            records.add(new ApiMessageAndVersion(cleanupPolicyRecord, (short) 0));
-        }
-
-        if (needsRetentionUpdate) {
-            ConfigRecord retentionRecord = new ConfigRecord()
-                .setResourceType(Type.TOPIC.id())
-                .setResourceName(topicName)
-                .setName(TopicConfig.RETENTION_MS_CONFIG)
-                .setValue(targetRetentionMs);
-            records.add(new ApiMessageAndVersion(retentionRecord, (short) 0));
-        }
-
-        if (needsMinCompactionLagUpdate) {
-            ConfigRecord minCompactionLagRecord = new ConfigRecord()
-                .setResourceType(Type.TOPIC.id())
-                .setResourceName(topicName)
-                .setName(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG)
-                .setValue(targetMinCompactionLagMs);
-            records.add(new ApiMessageAndVersion(minCompactionLagRecord, (short) 0));
-        }
-
-        if (needsSegmentMsUpdate) {
-            ConfigRecord segmentMsRecord = new ConfigRecord()
-                .setResourceType(Type.TOPIC.id())
-                .setResourceName(topicName)
-                .setName(TopicConfig.SEGMENT_MS_CONFIG)
-                .setValue(targetSegmentMs);
-            records.add(new ApiMessageAndVersion(segmentMsRecord, (short) 0));
-        }
+        ConfigRecord cleanupPolicyRecord = new ConfigRecord()
+            .setResourceType(Type.TOPIC.id())
+            .setResourceName(topicName)
+            .setName(TopicConfig.CLEANUP_POLICY_CONFIG)
+            .setValue(targetCleanupPolicy);
+        records.add(new ApiMessageAndVersion(cleanupPolicyRecord, (short) 0));
 
         return records;
     }
@@ -927,8 +886,8 @@ public class ConfigurationControlManager {
      *
      * Version 2 changes:
      * 1. Changes cleanup.policy to "compact" (removes "delete") - topic becomes compact-only
-     * 2. Removes min.compaction.lag.ms override - no longer needed, uses broker default
-     * 3. Removes retention.ms override - compact-only topics don't use time-based retention
+     * 2. Sets retention.ms to -1 (infinite retention) - compact-only topics should not delete based on time
+     * 3. Removes min.compaction.lag.ms override - uses broker default for immediate compaction eligibility
      *
      * In version 1, the topic used "compact,delete" policy with retention.ms and min.compaction.lag.ms
      * to safely handle the migration from old-format (null-key) messages. Version 2 transitions to
@@ -955,21 +914,23 @@ public class ConfigurationControlManager {
         String currentMinCompactionLagMs = configs.get(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG);
         String currentRetentionMs = configs.get(TopicConfig.RETENTION_MS_CONFIG);
 
-        // Target configuration for version 2: compact-only
+        // Target configuration for version 2: compact-only with infinite retention
         String targetCleanupPolicy = TopicConfig.CLEANUP_POLICY_COMPACT;
+        String targetRetentionMs = String.valueOf(-1L); // -1 means infinite retention
 
         boolean needsCleanupPolicyUpdate = !targetCleanupPolicy.equals(currentCleanupPolicy);
+        boolean needsRetentionMsUpdate = !targetRetentionMs.equals(currentRetentionMs);
         boolean needsMinCompactionLagRemoval = currentMinCompactionLagMs != null;
-        boolean needsRetentionMsRemoval = currentRetentionMs != null;
 
-        if (!needsCleanupPolicyUpdate && !needsMinCompactionLagRemoval && !needsRetentionMsRemoval) {
-            log.info("Topic {} already has correct version 2 configuration (cleanup.policy=compact, min.compaction.lag.ms unset, retention.ms unset).", topicName);
+        if (!needsCleanupPolicyUpdate && !needsRetentionMsUpdate && !needsMinCompactionLagRemoval) {
+            log.info("Topic {} already has correct version 2 configuration (cleanup.policy=compact, retention.ms=-1, min.compaction.lag.ms unset).", topicName);
             return List.of();
         }
 
-        log.info("Updating topic {} configuration for version 2. Current: cleanup.policy='{}', min.compaction.lag.ms='{}', retention.ms='{}'. " +
-                 "Target: cleanup.policy='{}', min.compaction.lag.ms unset, retention.ms unset",
-                 topicName, currentCleanupPolicy, currentMinCompactionLagMs, currentRetentionMs, targetCleanupPolicy);
+        log.info("Updating topic {} configuration for version 2. Current: cleanup.policy='{}', retention.ms='{}', min.compaction.lag.ms='{}'. " +
+                 "Target: cleanup.policy='{}', retention.ms='{}', min.compaction.lag.ms unset",
+                 topicName, currentCleanupPolicy, currentRetentionMs, currentMinCompactionLagMs,
+                 targetCleanupPolicy, targetRetentionMs);
 
         // Create ConfigRecords for the updates needed
         List<ApiMessageAndVersion> records = new ArrayList<>();
@@ -983,24 +944,23 @@ public class ConfigurationControlManager {
             records.add(new ApiMessageAndVersion(cleanupPolicyRecord, (short) 0));
         }
 
+        if (needsRetentionMsUpdate) {
+            ConfigRecord retentionMsRecord = new ConfigRecord()
+                .setResourceType(Type.TOPIC.id())
+                .setResourceName(topicName)
+                .setName(TopicConfig.RETENTION_MS_CONFIG)
+                .setValue(targetRetentionMs);
+            records.add(new ApiMessageAndVersion(retentionMsRecord, (short) 0));
+        }
+
         if (needsMinCompactionLagRemoval) {
-            // Setting value to null removes the config override
+            // Setting value to null removes the config override, uses broker default
             ConfigRecord minCompactionLagRecord = new ConfigRecord()
                 .setResourceType(Type.TOPIC.id())
                 .setResourceName(topicName)
                 .setName(TopicConfig.MIN_COMPACTION_LAG_MS_CONFIG)
                 .setValue(null);
             records.add(new ApiMessageAndVersion(minCompactionLagRecord, (short) 0));
-        }
-
-        if (needsRetentionMsRemoval) {
-            // Setting value to null removes the config override
-            ConfigRecord retentionMsRecord = new ConfigRecord()
-                .setResourceType(Type.TOPIC.id())
-                .setResourceName(topicName)
-                .setName(TopicConfig.RETENTION_MS_CONFIG)
-                .setValue(null);
-            records.add(new ApiMessageAndVersion(retentionMsRecord, (short) 0));
         }
 
         return records;
