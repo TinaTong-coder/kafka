@@ -101,15 +101,6 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
     /**
      * Test upgrade scenario: topic starts with delete policy (old messages with null keys),
      * then new messages with keys are written, and finally topic is changed to compacted.
-     *
-     * This simulates the actual upgrade path where:
-     * 1. Old cluster has messages with null keys (delete policy)
-     * 2. Upgrade to new code: new messages have keys
-     * 3. Both old and new messages coexist temporarily
-     * 4. After old messages expire, change to compacted policy
-     *
-     * Tests both COPY_SEGMENT_STARTED and DELETE_SEGMENT_STARTED states, which are
-     * the states that a new broker would encounter when reading old messages.
      */
     @ClusterTest
     public void testUpgradeScenarioWithMixedMessageFormats() throws Exception {
@@ -117,263 +108,133 @@ public class RemoteLogMetadataOldFormatCompatibilityTest {
                 Uuid.randomUuid(),
                 new TopicPartition("test-upgrade-scenario", 0)
         );
+        int brokerLeaderEpoch = 1;
 
-        // Step 1: Initialize RLMM with delete policy (simulating old cluster)
+        initializeOldCluster(topicIdPartition);
+        SegmentIds segmentIds = writeOldFormatMessages(topicIdPartition, brokerLeaderEpoch);
+        TopicBasedRemoteLogMetadataManager rlmm2 = upgradeToNewCode(topicIdPartition);
+        reEmitStatesWithKeys(topicIdPartition, rlmm2, segmentIds, brokerLeaderEpoch);
+        writeNewFormatMessages(topicIdPartition, rlmm2, brokerLeaderEpoch);
+        changeTopicToCompactedAndVerify(topicIdPartition, rlmm2, brokerLeaderEpoch);
+        log.info("✅ Test passed! Upgrade scenario with mixed message formats works correctly.");
+    }
+
+    private TopicBasedRemoteLogMetadataManager initializeOldCluster(TopicIdPartition topicIdPartition) throws Exception {
         log.info("Step 1: Initializing RLMM with delete policy...");
-
-        // First create the topic with delete policy by modifying the config
         TopicBasedRemoteLogMetadataManager rlmm = createManager();
-        rlmm.onPartitionLeadershipChanges(
-                Collections.singleton(topicIdPartition),
-                Collections.emptySet()
-        );
+        rlmm.onPartitionLeadershipChanges(Collections.singleton(topicIdPartition), Collections.emptySet());
         waitForInitialization(rlmm, topicIdPartition);
-        log.info("RLMM initialized and metadata topic created.");
-
-        // Change topic to delete policy to allow null keys
         changeTopicToDeletePolicy();
-        log.info("Changed metadata topic to delete cleanup policy.");
-
-        // Close RLMM before writing old format messages
         rlmm.close();
         remoteLogMetadataManager = null;
         Thread.sleep(2000);
+        return rlmm;
+    }
 
-        // Step 2: Write old format messages (null key) - simulating old code
-        // Test both COPY_SEGMENT_STARTED and DELETE_SEGMENT_STARTED states
-        log.info("Step 2: Writing old format messages (null key) with COPY_SEGMENT_STARTED state...");
-        RemoteLogSegmentId oldSegmentId1 = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
-        long oldEndOffset1 = 500L;
-        int brokerLeaderEpoch = 1;
+    private SegmentIds writeOldFormatMessages(TopicIdPartition topicIdPartition, int brokerLeaderEpoch) throws Exception {
+        log.info("Step 2: Writing old format messages (null key)...");
+        RemoteLogSegmentId segmentId1 = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
+        RemoteLogSegmentId segmentId2 = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
+        long endOffset1 = 500L;
+        long endOffset2 = 1000L;
 
-        RemoteLogSegmentMetadata oldMetadata1 = new RemoteLogSegmentMetadata(
-                oldSegmentId1,
-                0L,
-                oldEndOffset1,
-                -1L,
-                0,
-                time.milliseconds(),
-                SEG_SIZE,
-                Collections.singletonMap(0, 0L),
-                brokerLeaderEpoch
-        );
+        writeMessageWithNullKey(topicIdPartition, new RemoteLogSegmentMetadata(
+                segmentId1, 0L, endOffset1, -1L, 0, time.milliseconds(), SEG_SIZE,
+                Collections.singletonMap(0, 0L), brokerLeaderEpoch));
 
-        writeMessageWithNullKey(topicIdPartition, oldMetadata1);
-        log.info("Old format message (COPY_SEGMENT_STARTED) written successfully.");
+        writeMessageWithNullKey(topicIdPartition, new RemoteLogSegmentMetadata(
+                segmentId2, 501L, endOffset2, -1L, 0, time.milliseconds(), SEG_SIZE,
+                Collections.singletonMap(0, 501L), brokerLeaderEpoch));
 
-        // Write another old format message going through full lifecycle to DELETE_SEGMENT_STARTED
-        log.info("Writing old format message with full lifecycle: COPY_SEGMENT_STARTED -> COPY_SEGMENT_FINISHED -> DELETE_SEGMENT_STARTED...");
-        RemoteLogSegmentId oldSegmentId2 = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
-        long oldEndOffset2 = 1000L;
+        writeUpdateWithNullKey(topicIdPartition, new RemoteLogSegmentMetadataUpdate(
+                segmentId2, time.milliseconds(), Optional.empty(),
+                RemoteLogSegmentState.COPY_SEGMENT_FINISHED, 0, brokerLeaderEpoch, endOffset2));
 
-        // 1. Write COPY_SEGMENT_STARTED
-        RemoteLogSegmentMetadata oldMetadata2 = new RemoteLogSegmentMetadata(
-                oldSegmentId2,
-                501L,
-                oldEndOffset2,
-                -1L,
-                0,
-                time.milliseconds(),
-                SEG_SIZE,
-                Collections.singletonMap(0, 501L),
-                brokerLeaderEpoch
-        );
-        writeMessageWithNullKey(topicIdPartition, oldMetadata2);
-        log.info("  - COPY_SEGMENT_STARTED written");
-
-        // 2. Write COPY_SEGMENT_FINISHED
-        RemoteLogSegmentMetadataUpdate copyFinished = new RemoteLogSegmentMetadataUpdate(
-                oldSegmentId2,
-                time.milliseconds(),
-                Optional.empty(),
-                RemoteLogSegmentState.COPY_SEGMENT_FINISHED,
-                0,
-                brokerLeaderEpoch,
-                oldEndOffset2
-        );
-        writeUpdateWithNullKey(topicIdPartition, copyFinished);
-        log.info("  - COPY_SEGMENT_FINISHED written");
-
-        // 3. Write DELETE_SEGMENT_STARTED
-        RemoteLogSegmentMetadataUpdate deleteStarted = new RemoteLogSegmentMetadataUpdate(
-                oldSegmentId2,
-                time.milliseconds(),
-                Optional.empty(),
-                RemoteLogSegmentState.DELETE_SEGMENT_STARTED,
-                0,
-                brokerLeaderEpoch,
-                oldEndOffset2
-        );
-        writeUpdateWithNullKey(topicIdPartition, deleteStarted);
-        log.info("  - DELETE_SEGMENT_STARTED written");
-        log.info("Old format messages written successfully.");
+        writeUpdateWithNullKey(topicIdPartition, new RemoteLogSegmentMetadataUpdate(
+                segmentId2, time.milliseconds(), Optional.empty(),
+                RemoteLogSegmentState.DELETE_SEGMENT_STARTED, 0, brokerLeaderEpoch, endOffset2));
 
         Thread.sleep(2000);
+        return new SegmentIds(segmentId1, segmentId2, endOffset1, endOffset2);
+    }
 
-        // Step 3: Re-initialize RLMM (simulating upgrade to new code)
-        log.info("Step 3: Upgrading to new code (re-initializing RLMM)...");
-        final TopicBasedRemoteLogMetadataManager rlmm2 = createManager();
-        rlmm2.onPartitionLeadershipChanges(
-                Collections.singleton(topicIdPartition),
-                Collections.emptySet()
-        );
+    private TopicBasedRemoteLogMetadataManager upgradeToNewCode(TopicIdPartition topicIdPartition) throws Exception {
+        log.info("Step 3: Upgrading to new code...");
+        TopicBasedRemoteLogMetadataManager rlmm2 = createManager();
+        rlmm2.onPartitionLeadershipChanges(Collections.singleton(topicIdPartition), Collections.emptySet());
         waitForInitialization(rlmm2, topicIdPartition);
-        log.info("RLMM re-initialized with new code.");
-
-        // Wait for consumer to catch up and process old messages
         Thread.sleep(3000);
+        return rlmm2;
+    }
 
-        // Step 4: New broker re-emits states with keys based on what it reads
-        // This simulates what happens when a new broker starts up and processes existing segments
+    private void reEmitStatesWithKeys(TopicIdPartition topicIdPartition, TopicBasedRemoteLogMetadataManager rlmm2,
+                                      SegmentIds segmentIds, int brokerLeaderEpoch) throws Exception {
         log.info("Step 4: New broker re-emitting states with keys...");
-
-        // First segment: was in COPY_SEGMENT_STARTED, so re-emit COPY_SEGMENT_STARTED with key
-        log.info("Processing first segment (was in COPY_SEGMENT_STARTED state)...");
-        RemoteLogSegmentMetadata reEmit1 = new RemoteLogSegmentMetadata(
-                oldSegmentId1,
-                0L,
-                oldEndOffset1,
-                -1L,
-                0,
-                time.milliseconds(),
-                SEG_SIZE,
-                Collections.singletonMap(0, 0L),
-                brokerLeaderEpoch
-        );
-        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(reEmit1).get(),
-                "New broker should be able to re-emit COPY_SEGMENT_STARTED with key");
-        log.info("  ✅ Re-emitted COPY_SEGMENT_STARTED (now with key)");
+        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(new RemoteLogSegmentMetadata(
+                segmentIds.segmentId1, 0L, segmentIds.endOffset1, -1L, 0, time.milliseconds(), SEG_SIZE,
+                Collections.singletonMap(0, 0L), brokerLeaderEpoch)).get());
 
         Thread.sleep(1000);
-
-        // Update to COPY_SEGMENT_FINISHED
-        RemoteLogSegmentMetadataUpdate update1 = new RemoteLogSegmentMetadataUpdate(
-                oldSegmentId1,
-                time.milliseconds(),
-                Optional.empty(),
-                RemoteLogSegmentState.COPY_SEGMENT_FINISHED,
-                0,
-                brokerLeaderEpoch,
-                oldEndOffset1
-        );
-        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(update1).get(),
-                "Should be able to update to COPY_SEGMENT_FINISHED");
+        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(
+                segmentIds.segmentId1, time.milliseconds(), Optional.empty(),
+                RemoteLogSegmentState.COPY_SEGMENT_FINISHED, 0, brokerLeaderEpoch, segmentIds.endOffset1)).get());
 
         Thread.sleep(1000);
+        Optional<RemoteLogSegmentMetadata> retrieved = rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
+        assertTrue(retrieved.isPresent());
+        assertEquals(segmentIds.segmentId1, retrieved.get().remoteLogSegmentId());
 
-        // Verify first segment can be read and has correct state
-        Optional<RemoteLogSegmentMetadata> retrievedOld1 =
-                rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
-        assertTrue(retrievedOld1.isPresent(), "Should be able to read first segment");
-        assertEquals(oldSegmentId1, retrievedOld1.get().remoteLogSegmentId());
-        assertEquals(RemoteLogSegmentState.COPY_SEGMENT_FINISHED, retrievedOld1.get().state());
-        log.info("  ✅ Updated to COPY_SEGMENT_FINISHED");
-
-        // Second segment: was in DELETE_SEGMENT_STARTED, so directly re-emit DELETE_SEGMENT_STARTED with key
-        // (no need to go through COPY_SEGMENT_STARTED again)
-        log.info("Processing second segment (was in DELETE_SEGMENT_STARTED state)...");
-        RemoteLogSegmentMetadataUpdate reEmitDelete = new RemoteLogSegmentMetadataUpdate(
-                oldSegmentId2,
-                time.milliseconds(),
-                Optional.empty(),
-                RemoteLogSegmentState.DELETE_SEGMENT_STARTED,
-                0,
-                brokerLeaderEpoch,
-                oldEndOffset2
-        );
-        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(reEmitDelete).get(),
-                "New broker should be able to re-emit DELETE_SEGMENT_STARTED with key");
-        log.info("  ✅ Re-emitted DELETE_SEGMENT_STARTED (now with key) - skipping COPY states");
+        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(
+                segmentIds.segmentId2, time.milliseconds(), Optional.empty(),
+                RemoteLogSegmentState.DELETE_SEGMENT_STARTED, 0, brokerLeaderEpoch, segmentIds.endOffset2)).get());
 
         Thread.sleep(1000);
+        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(
+                segmentIds.segmentId2, time.milliseconds(), Optional.empty(),
+                RemoteLogSegmentState.DELETE_SEGMENT_FINISHED, 0, brokerLeaderEpoch, segmentIds.endOffset2)).get());
+    }
 
-        // Update to DELETE_SEGMENT_FINISHED
-        RemoteLogSegmentMetadataUpdate update2 = new RemoteLogSegmentMetadataUpdate(
-                oldSegmentId2,
-                time.milliseconds(),
-                Optional.empty(),
-                RemoteLogSegmentState.DELETE_SEGMENT_FINISHED,
-                0,
-                brokerLeaderEpoch,
-                oldEndOffset2
-        );
-        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(update2).get(),
-                "Should be able to update to DELETE_SEGMENT_FINISHED");
-        log.info("  ✅ Updated to DELETE_SEGMENT_FINISHED");
-
-        // Step 5: Write new format message (with key) - new code
-        log.info("Step 5: Writing new format message (with key)...");
+    private void writeNewFormatMessages(TopicIdPartition topicIdPartition, TopicBasedRemoteLogMetadataManager rlmm2,
+                                       int brokerLeaderEpoch) throws Exception {
+        log.info("Step 5: Writing new format messages...");
         RemoteLogSegmentId newSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
         long newEndOffset = 1500L;
 
-        RemoteLogSegmentMetadata newMetadata = new RemoteLogSegmentMetadata(
-                newSegmentId,
-                1001L,
-                newEndOffset,
-                -1L,
-                0,
-                time.milliseconds(),
-                SEG_SIZE,
-                Collections.singletonMap(0, 1001L),
-                brokerLeaderEpoch
-        );
+        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(new RemoteLogSegmentMetadata(
+                newSegmentId, 1001L, newEndOffset, -1L, 0, time.milliseconds(), SEG_SIZE,
+                Collections.singletonMap(0, 1001L), brokerLeaderEpoch)).get());
 
-        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(newMetadata).get(),
-                "Should be able to add new segment with key");
-
-        RemoteLogSegmentMetadataUpdate newUpdate = new RemoteLogSegmentMetadataUpdate(
-                newSegmentId,
-                time.milliseconds(),
-                Optional.empty(),
-                RemoteLogSegmentState.COPY_SEGMENT_FINISHED,
-                0,
-                brokerLeaderEpoch,
-                newEndOffset
-        );
-        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(newUpdate).get());
+        assertDoesNotThrow(() -> rlmm2.updateRemoteLogSegmentMetadata(new RemoteLogSegmentMetadataUpdate(
+                newSegmentId, time.milliseconds(), Optional.empty(),
+                RemoteLogSegmentState.COPY_SEGMENT_FINISHED, 0, brokerLeaderEpoch, newEndOffset)).get());
 
         Thread.sleep(1000);
+    }
 
-        // Step 6: Verify remaining segments (first old segment + new segment)
-        // Note: second old segment is deleted (DELETE_SEGMENT_FINISHED) so it should not be retrievable
-        log.info("Step 6: Verifying remaining segments (first old segment + new segment)...");
-        Optional<RemoteLogSegmentMetadata> retrievedNew =
-                rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 1250);
-        assertTrue(retrievedNew.isPresent(), "Should be able to read new segment");
-        assertEquals(newSegmentId, retrievedNew.get().remoteLogSegmentId());
-
-        retrievedOld1 = rlmm2.remoteLogSegmentMetadata(topicIdPartition, 0, 250);
-        assertTrue(retrievedOld1.isPresent(), "First old segment should still be accessible");
-        assertEquals(oldSegmentId1, retrievedOld1.get().remoteLogSegmentId());
-
-        log.info("✅ All accessible segments verified successfully!");
-
-        // Step 7: Change topic to compacted (simulating after retention period)
-        log.info("Step 7: Changing topic to compacted policy...");
+    private void changeTopicToCompactedAndVerify(TopicIdPartition topicIdPartition,
+                                                 TopicBasedRemoteLogMetadataManager rlmm2,
+                                                 int brokerLeaderEpoch) throws Exception {
+        log.info("Step 6: Changing to compacted policy and verifying...");
         changeTopicToCompactedPolicy();
-        log.info("✅ Topic changed to compacted policy.");
 
-        // Step 8: Verify new segments can still be written with compacted policy
-        log.info("Step 8: Writing another new segment with compacted policy...");
         RemoteLogSegmentId thirdSegmentId = new RemoteLogSegmentId(topicIdPartition, Uuid.randomUuid());
-        long thirdEndOffset = 2500L;
+        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(new RemoteLogSegmentMetadata(
+                thirdSegmentId, 1501L, 2500L, -1L, 0, time.milliseconds(), SEG_SIZE,
+                Collections.singletonMap(0, 1501L), brokerLeaderEpoch)).get());
+    }
 
-        RemoteLogSegmentMetadata thirdMetadata = new RemoteLogSegmentMetadata(
-                thirdSegmentId,
-                1501L,
-                thirdEndOffset,
-                -1L,
-                0,
-                time.milliseconds(),
-                SEG_SIZE,
-                Collections.singletonMap(0, 1501L),
-                brokerLeaderEpoch
-        );
+    private static class SegmentIds {
+        final RemoteLogSegmentId segmentId1;
+        final RemoteLogSegmentId segmentId2;
+        final long endOffset1;
+        final long endOffset2;
 
-        assertDoesNotThrow(() -> rlmm2.addRemoteLogSegmentMetadata(thirdMetadata).get(),
-                "Should be able to add new segment with compacted policy");
-
-        log.info("✅ Test passed! Upgrade scenario with mixed message formats works correctly.");
+        SegmentIds(RemoteLogSegmentId segmentId1, RemoteLogSegmentId segmentId2, long endOffset1, long endOffset2) {
+            this.segmentId1 = segmentId1;
+            this.segmentId2 = segmentId2;
+            this.endOffset1 = endOffset1;
+            this.endOffset2 = endOffset2;
+        }
     }
 
     private void writeMessageWithNullKey(TopicIdPartition topicIdPartition,

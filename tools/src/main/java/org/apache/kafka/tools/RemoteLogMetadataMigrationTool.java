@@ -26,9 +26,9 @@ import org.apache.kafka.clients.consumer.ConsumerConfig;
 import org.apache.kafka.clients.consumer.ConsumerRecord;
 import org.apache.kafka.clients.consumer.ConsumerRecords;
 import org.apache.kafka.clients.consumer.KafkaConsumer;
+import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.config.ConfigResource;
 import org.apache.kafka.common.config.TopicConfig;
-import org.apache.kafka.common.TopicPartition;
 import org.apache.kafka.common.serialization.ByteArrayDeserializer;
 import org.apache.kafka.common.utils.Utils;
 import org.apache.kafka.common.utils.internals.Exit;
@@ -299,13 +299,34 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean upgradeToV2, boolean force) throws Exception {
-        // First, check the current topic configuration to remind users about the retention period
-        Properties adminProps = new Properties();
-        adminProps.putAll(baseProps);
-        adminProps.put("bootstrap.servers", bootstrapServers);
+    private static Properties createConsumerProperties(Properties baseProps, String bootstrapServers) {
+        Properties consumerProps = new Properties();
+        consumerProps.putAll(baseProps);
+        consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
+        consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "remote-log-metadata-migration-tool-" + System.currentTimeMillis());
+        consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+        consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
+        consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
+        consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
+        consumerProps.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
+        return consumerProps;
+    }
 
-        try (Admin admin = Admin.create(adminProps)) {
+    private static void printCheckHeader(String bootstrapServers, long timeoutMs, boolean upgradeToV2, boolean force) {
+        System.out.println("Checking __remote_log_metadata topic for messages with null keys...");
+        System.out.println("Bootstrap servers: " + bootstrapServers);
+        System.out.println("Timeout: " + timeoutMs + "ms");
+        if (upgradeToV2) {
+            System.out.println("Upgrade to V2: ENABLED (will upgrade to version 2 if validation passes)");
+            if (force) {
+                System.out.println("Force mode: ENABLED (will upgrade even if null-key messages are found)");
+            }
+        }
+        System.out.println();
+    }
+
+    private static void printTopicConfigurationReminder(Admin admin) {
+        try {
             ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
             Config topicConfig = admin.describeConfigs(Collections.singleton(topicResource))
                 .all().get().get(topicResource);
@@ -339,35 +360,195 @@ public class RemoteLogMetadataMigrationTool {
                 System.out.println();
             }
         } catch (Exception e) {
-            // If we can't get the config, just log a warning and continue
             System.out.println("Warning: Could not retrieve topic configuration. Proceeding with validation anyway.");
             System.out.println("Error: " + e.getMessage());
             System.out.println();
         }
+    }
 
-        Properties consumerProps = new Properties();
-        consumerProps.putAll(baseProps);
-        consumerProps.put(ConsumerConfig.BOOTSTRAP_SERVERS_CONFIG, bootstrapServers);
-        consumerProps.put(ConsumerConfig.GROUP_ID_CONFIG, "remote-log-metadata-migration-tool-" + System.currentTimeMillis());
-        consumerProps.put(ConsumerConfig.KEY_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        consumerProps.put(ConsumerConfig.VALUE_DESERIALIZER_CLASS_CONFIG, ByteArrayDeserializer.class.getName());
-        consumerProps.put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest");
-        consumerProps.put(ConsumerConfig.ENABLE_AUTO_COMMIT_CONFIG, "false");
-        consumerProps.put(ConsumerConfig.ISOLATION_LEVEL_CONFIG, "read_committed");
+    private static void printRetrySuggestion(Admin admin, long lastNullKeyTimestamp) {
+        try {
+            long currentTime = System.currentTimeMillis();
+            long messageAgeMs = currentTime - lastNullKeyTimestamp;
+            long messageAgeDays = messageAgeMs / (24 * 60 * 60 * 1000L);
 
-        System.out.println("Checking __remote_log_metadata topic for messages with null keys...");
-        System.out.println("Bootstrap servers: " + bootstrapServers);
-        System.out.println("Timeout: " + timeoutMs + "ms");
-        if (upgradeToV2) {
-            System.out.println("Upgrade to V2: ENABLED (will upgrade to version 2 if validation passes)");
-            if (force) {
-                System.out.println("Force mode: ENABLED (will upgrade even if null-key messages are found)");
+            System.out.println("Last null-key message timestamp: " + lastNullKeyTimestamp);
+            System.out.println("Last null-key message age: " + messageAgeDays + " days (" + (messageAgeMs / (60 * 60 * 1000L)) + " hours)");
+            System.out.println();
+
+            ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
+            Config topicConfig = admin.describeConfigs(Collections.singleton(topicResource))
+                .all().get().get(topicResource);
+            ConfigEntry retentionMsEntry = topicConfig.get(TopicConfig.RETENTION_MS_CONFIG);
+
+            if (retentionMsEntry != null && retentionMsEntry.value() != null) {
+                long retentionMs = Long.parseLong(retentionMsEntry.value());
+                long retentionDays = retentionMs / (24 * 60 * 60 * 1000L);
+                long remainingMs = retentionMs - messageAgeMs;
+
+                if (remainingMs > 0) {
+                    long remainingDays = remainingMs / (24 * 60 * 60 * 1000L);
+                    long retryTimestamp = lastNullKeyTimestamp + retentionMs;
+
+                    System.out.println("Topic retention.ms: " + retentionMs + "ms (" + retentionDays + " days)");
+                    System.out.println();
+                    System.out.println("💡 SUGGESTION:");
+                    System.out.println("  Wait approximately " + remainingDays + " more day(s) for null-key messages to expire.");
+                    System.out.println("  Retry this validation after: " + new java.util.Date(retryTimestamp));
+                    System.out.println();
+                }
+            }
+        } catch (RuntimeException e) {
+            throw e;
+        } catch (Exception e) {
+            // Ignore errors when trying to get retry suggestion (ExecutionException, InterruptedException, etc.)
+        }
+    }
+
+    private static ScanResult scanMessagesForNullKeys(KafkaConsumer<byte[], byte[]> consumer, long timeoutMs) {
+        List<TopicPartition> partitions = consumer.partitionsFor(METADATA_TOPIC)
+            .stream()
+            .map(info -> new TopicPartition(info.topic(), info.partition()))
+            .toList();
+
+        if (partitions.isEmpty()) {
+            return new ScanResult(0, 0, -1);
+        }
+
+        System.out.println("Found " + partitions.size() + " partition(s) in " + METADATA_TOPIC);
+        consumer.assign(partitions);
+        consumer.seekToBeginning(partitions);
+
+        AtomicLong totalMessages = new AtomicLong(0);
+        AtomicLong nullKeyMessages = new AtomicLong(0);
+        long lastNullKeyTimestamp = -1;
+        long startTime = System.currentTimeMillis();
+        boolean hasMoreRecords = true;
+
+        System.out.println("Scanning messages...");
+
+        while (hasMoreRecords && (System.currentTimeMillis() - startTime) < timeoutMs) {
+            ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofMillis(1000));
+
+            if (records.isEmpty()) {
+                hasMoreRecords = checkHasMoreRecords(consumer, partitions);
+            } else {
+                for (ConsumerRecord<byte[], byte[]> record : records) {
+                    totalMessages.incrementAndGet();
+
+                    if (record.key() == null) {
+                        nullKeyMessages.incrementAndGet();
+                        lastNullKeyTimestamp = Math.max(lastNullKeyTimestamp, record.timestamp());
+                        System.out.println("⚠️  Found message with null key at partition=" + record.partition() +
+                            ", offset=" + record.offset() + ", timestamp=" + record.timestamp());
+                    }
+
+                    if (totalMessages.get() % 10000 == 0) {
+                        System.out.println("Scanned " + totalMessages.get() + " messages so far...");
+                    }
+                }
             }
         }
+
+        return new ScanResult(totalMessages.get(), nullKeyMessages.get(), lastNullKeyTimestamp);
+    }
+
+    private static boolean checkHasMoreRecords(KafkaConsumer<byte[], byte[]> consumer, List<TopicPartition> partitions) {
+        for (TopicPartition partition : partitions) {
+            long position = consumer.position(partition);
+            long endOffset = consumer.endOffsets(Collections.singleton(partition)).get(partition);
+            if (position < endOffset) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static void handleScanResults(ScanResult result, Admin admin, String bootstrapServers, Properties baseProps,
+                                          boolean upgradeToV2, boolean force) throws Exception {
+        System.out.println();
+        System.out.println("Scan completed.");
+        System.out.println("Total messages scanned: " + result.totalMessages);
+        System.out.println("Messages with null keys: " + result.nullKeyMessages);
         System.out.println();
 
+        if (result.nullKeyMessages > 0) {
+            handleNullKeysFound(result, admin, bootstrapServers, baseProps, upgradeToV2, force);
+        } else {
+            handleNoNullKeysFound(bootstrapServers, baseProps, upgradeToV2);
+        }
+    }
+
+    private static void handleNullKeysFound(ScanResult result, Admin admin, String bootstrapServers,
+                                            Properties baseProps, boolean upgradeToV2, boolean force) throws Exception {
+        System.out.println("❌ VALIDATION FAILED: Found " + result.nullKeyMessages + " message(s) with null keys.");
+        System.out.println();
+
+        if (result.lastNullKeyTimestamp > 0) {
+            printRetrySuggestion(admin, result.lastNullKeyTimestamp);
+        }
+
+        System.out.println("Action required:");
+        System.out.println("1. Wait for null-key messages to expire based on retention.ms setting");
+        System.out.println("2. Then run this tool again to verify all null-key messages are gone");
+        System.out.println("3. Only then proceed with the upgrade to remote.log.storage.version=2");
+        System.out.println();
+
+        if (force) {
+            System.out.println("⚠️  WARNING: --force flag is enabled. Proceeding with upgrade despite null-key messages.");
+            System.out.println("⚠️  These null-key messages will be LOST during compaction!");
+            System.out.println();
+            if (upgradeToV2) {
+                performUpgradeToV2(bootstrapServers, baseProps);
+            }
+        } else {
+            System.out.println("To force upgrade despite null-key messages (NOT RECOMMENDED), use --force flag.");
+            throw new TerseException("Cannot upgrade to version 2: null-key messages found in " + METADATA_TOPIC);
+        }
+    }
+
+    private static void handleNoNullKeysFound(String bootstrapServers, Properties baseProps, boolean upgradeToV2) throws Exception {
+        System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
+        System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
+        System.out.println();
+
+        if (upgradeToV2) {
+            performUpgradeToV2(bootstrapServers, baseProps);
+        } else {
+            System.out.println("To upgrade, run:");
+            System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
+            System.out.println();
+            System.out.println("Or run this tool with --upgrade-to-v2 to automatically upgrade:");
+            System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2");
+        }
+    }
+
+    private static class ScanResult {
+        final long totalMessages;
+        final long nullKeyMessages;
+        final long lastNullKeyTimestamp;
+
+        ScanResult(long totalMessages, long nullKeyMessages, long lastNullKeyTimestamp) {
+            this.totalMessages = totalMessages;
+            this.nullKeyMessages = nullKeyMessages;
+            this.lastNullKeyTimestamp = lastNullKeyTimestamp;
+        }
+    }
+
+    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean upgradeToV2, boolean force) throws Exception {
+        Properties adminProps = new Properties();
+        adminProps.putAll(baseProps);
+        adminProps.put("bootstrap.servers", bootstrapServers);
+
+        try (Admin admin = Admin.create(adminProps)) {
+            printTopicConfigurationReminder(admin);
+        }
+
+        Properties consumerProps = createConsumerProperties(baseProps, bootstrapServers);
+
+        printCheckHeader(bootstrapServers, timeoutMs, upgradeToV2, force);
+
         try (KafkaConsumer<byte[], byte[]> consumer = new KafkaConsumer<>(consumerProps)) {
-            // Get all partitions of the metadata topic
             List<TopicPartition> partitions = consumer.partitionsFor(METADATA_TOPIC)
                 .stream()
                 .map(info -> new TopicPartition(info.topic(), info.partition()))
@@ -379,133 +560,10 @@ public class RemoteLogMetadataMigrationTool {
                 return;
             }
 
-            System.out.println("Found " + partitions.size() + " partition(s) in " + METADATA_TOPIC);
-            consumer.assign(partitions);
-            consumer.seekToBeginning(partitions);
+            ScanResult result = scanMessagesForNullKeys(consumer, timeoutMs);
 
-            AtomicLong totalMessages = new AtomicLong(0);
-            AtomicLong nullKeyMessages = new AtomicLong(0);
-            long lastNullKeyTimestamp = -1;
-            long startTime = System.currentTimeMillis();
-            boolean hasMoreRecords = true;
-
-            System.out.println("Scanning messages...");
-
-            while (hasMoreRecords && (System.currentTimeMillis() - startTime) < timeoutMs) {
-                ConsumerRecords<byte[], byte[]> records = consumer.poll(Duration.ofMillis(1000));
-
-                if (records.isEmpty()) {
-                    // Check if we've reached the end of all partitions
-                    hasMoreRecords = false;
-                    for (TopicPartition partition : partitions) {
-                        long position = consumer.position(partition);
-                        long endOffset = consumer.endOffsets(Collections.singleton(partition)).get(partition);
-                        if (position < endOffset) {
-                            hasMoreRecords = true;
-                            break;
-                        }
-                    }
-                } else {
-                    for (ConsumerRecord<byte[], byte[]> record : records) {
-                        totalMessages.incrementAndGet();
-
-                        if (record.key() == null) {
-                            nullKeyMessages.incrementAndGet();
-                            lastNullKeyTimestamp = Math.max(lastNullKeyTimestamp, record.timestamp());
-                            System.out.println("⚠️  Found message with null key at partition=" + record.partition() +
-                                ", offset=" + record.offset() + ", timestamp=" + record.timestamp());
-                        }
-
-                        // Print progress every 10000 messages
-                        if (totalMessages.get() % 10000 == 0) {
-                            System.out.println("Scanned " + totalMessages.get() + " messages so far...");
-                        }
-                    }
-                }
-            }
-
-            System.out.println();
-            System.out.println("Scan completed.");
-            System.out.println("Total messages scanned: " + totalMessages.get());
-            System.out.println("Messages with null keys: " + nullKeyMessages.get());
-            System.out.println();
-
-            if (nullKeyMessages.get() > 0) {
-                System.out.println("❌ VALIDATION FAILED: Found " + nullKeyMessages.get() + " message(s) with null keys.");
-                System.out.println();
-
-                // Display timestamp information and retry suggestion
-                if (lastNullKeyTimestamp > 0) {
-                    long currentTime = System.currentTimeMillis();
-                    long messageAgeMs = currentTime - lastNullKeyTimestamp;
-                    long messageAgeDays = messageAgeMs / (24 * 60 * 60 * 1000L);
-
-                    System.out.println("Last null-key message timestamp: " + lastNullKeyTimestamp);
-                    System.out.println("Last null-key message age: " + messageAgeDays + " days (" + (messageAgeMs / (60 * 60 * 1000L)) + " hours)");
-                    System.out.println();
-
-                    // Get retention.ms to suggest when to retry
-                    try (Admin admin = Admin.create(adminProps)) {
-                        ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
-                        Config topicConfig = admin.describeConfigs(Collections.singleton(topicResource))
-                            .all().get().get(topicResource);
-                        ConfigEntry retentionMsEntry = topicConfig.get(TopicConfig.RETENTION_MS_CONFIG);
-
-                        if (retentionMsEntry != null && retentionMsEntry.value() != null) {
-                            long retentionMs = Long.parseLong(retentionMsEntry.value());
-                            long retentionDays = retentionMs / (24 * 60 * 60 * 1000L);
-                            long remainingMs = retentionMs - messageAgeMs;
-
-                            if (remainingMs > 0) {
-                                long remainingDays = remainingMs / (24 * 60 * 60 * 1000L);
-                                long retryTimestamp = lastNullKeyTimestamp + retentionMs;
-
-                                System.out.println("Topic retention.ms: " + retentionMs + "ms (" + retentionDays + " days)");
-                                System.out.println();
-                                System.out.println("💡 SUGGESTION:");
-                                System.out.println("  Wait approximately " + remainingDays + " more day(s) for null-key messages to expire.");
-                                System.out.println("  Retry this validation after: " + new java.util.Date(retryTimestamp));
-                                System.out.println();
-                            }
-                        }
-                    } catch (Exception e) {
-                        // Ignore errors when trying to get retry suggestion
-                    }
-                }
-
-                System.out.println("Action required:");
-                System.out.println("1. Wait for null-key messages to expire based on retention.ms setting");
-                System.out.println("2. Then run this tool again to verify all null-key messages are gone");
-                System.out.println("3. Only then proceed with the upgrade to remote.log.storage.version=2");
-                System.out.println();
-
-                if (force) {
-                    System.out.println("⚠️  WARNING: --force flag is enabled. Proceeding with upgrade despite null-key messages.");
-                    System.out.println("⚠️  These null-key messages will be LOST during compaction!");
-                    System.out.println();
-                } else {
-                    System.out.println("To force upgrade despite null-key messages (NOT RECOMMENDED), use --force flag.");
-                    throw new TerseException("Cannot upgrade to version 2: null-key messages found in " + METADATA_TOPIC);
-                }
-            }
-
-            // If we reach here with force flag, we proceed with upgrade despite null keys
-            if (nullKeyMessages.get() == 0 || force) {
-                if (nullKeyMessages.get() == 0) {
-                    System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
-                    System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
-                    System.out.println();
-                }
-
-                if (upgradeToV2) {
-                    performUpgradeToV2(bootstrapServers, baseProps);
-                } else {
-                    System.out.println("To upgrade, run:");
-                    System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
-                    System.out.println();
-                    System.out.println("Or run this tool with --upgrade-to-v2 to automatically upgrade:");
-                    System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2");
-                }
+            try (Admin admin = Admin.create(adminProps)) {
+                handleScanResults(result, admin, bootstrapServers, baseProps, upgradeToV2, force);
             }
         }
     }
