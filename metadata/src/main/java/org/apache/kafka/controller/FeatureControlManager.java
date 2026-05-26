@@ -302,17 +302,6 @@ public class FeatureControlManager {
                 return ApiError.NONE;
             }
         } else {
-            // Special handling for remote.log.storage.version
-            if (featureName.equals(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME)) {
-                // Prevent direct upgrade from 0 to 2 - must go through 1 first
-                if (currentVersion == 0 && newVersion == 2) {
-                    return invalidUpdateVersion(featureName, newVersion,
-                        "Cannot upgrade directly from version 0 to version 2. " +
-                        "Must upgrade to version 1 first, run RemoteLogMetadataMigrationTool to verify migration, " +
-                        "then upgrade to version 2.");
-                }
-            }
-
             // Validate dependencies for features that are not metadata.version
             try {
                 Feature.validateVersion(
