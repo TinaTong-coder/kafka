@@ -830,7 +830,7 @@ public class ConfigurationControlManager {
     /**
      * Generates ConfigRecords to update the __remote_log_metadata topic to use compaction and deletion
      * cleanup policy with 30-minute retention.
-     * This is called when the remote.log.storage.version feature is being upgraded to level 1 or higher.
+     * This is called when the remote.log.metadata.version feature is being upgraded to level 1 or higher.
      *
      * The method checks if the topic exists and if it already has the correct configuration.
      * If updates are needed, it returns a list of ApiMessageAndVersion containing the ConfigRecords.
@@ -882,7 +882,7 @@ public class ConfigurationControlManager {
 
     /**
      * Generates ConfigRecords to update the __remote_log_metadata topic configuration for version 2.
-     * This is called when the remote.log.storage.version feature is being upgraded from level 1 to level 2.
+     * This is called when the remote.log.metadata.version feature is being upgraded from level 1 to level 2.
      *
      * Version 2 changes:
      * 1. Changes cleanup.policy to "compact" (removes "delete") - topic becomes compact-only
@@ -973,7 +973,7 @@ public class ConfigurationControlManager {
      * when running kafka-features.sh upgrade command. This method just logs informational message.
      */
     void logValidationReminder() {
-        log.info("Upgrading to remote.log.storage.version=2. " +
+        log.info("Upgrading to remote.log.metadata.version=2. " +
                  "Ensure you have run 'kafka-remote-log-metadata-migration.sh --check' " +
                  "to verify no null-key messages exist in __remote_log_metadata topic.");
     }

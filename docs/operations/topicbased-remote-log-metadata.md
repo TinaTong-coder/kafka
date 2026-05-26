@@ -2,7 +2,7 @@
 
 ## Overview
 
-This feature enables safe compaction of the `__remote_log_metadata` topic through a three-version upgrade path controlled by `remote.log.storage.version`.
+This feature enables safe compaction of the `__remote_log_metadata` topic through a three-version upgrade path controlled by `remote.log.metadata.version`.
 
 **Note**: The upgrade path is only required for **existing clusters** that already have the `__remote_log_metadata` topic. New clusters automatically use version 2.
 
@@ -56,7 +56,7 @@ The three-version approach:
 kafka-storage.sh format -t <cluster-id> -c server.properties
 kafka-server-start.sh server.properties
 ```
-- `remote.log.storage.version` automatically set to 2 (LATEST_PRODUCTION)
+- `remote.log.metadata.version` automatically set to 2 (LATEST_PRODUCTION)
 - Topic created with `cleanup.policy=compact`
 - All messages have keys from the start
 - **No migration required**
@@ -75,7 +75,7 @@ kafka-remote-log-metadata-migration.sh \
 ```
 Result:
 - Topic config: `cleanup.policy=compact,delete`, `retention.ms=1209600000`, `min.compaction.lag.ms=1209600000`, `segment.ms=604800000`
-- Feature: `remote.log.storage.version=1`
+- Feature: `remote.log.metadata.version=1`
 - New messages have keys, old null-key messages will expire via retention
 
 **Step 2: Wait for Retention Period**
@@ -95,7 +95,7 @@ Result:
 - Scans topic for null-key messages
 - Records last null-key message timestamp and suggests retry time if validation fails
 - If validation passes:
-  - Feature: `remote.log.storage.version=2`
+  - Feature: `remote.log.metadata.version=2`
   - Topic config: `cleanup.policy=compact` (min.compaction.lag.ms and retention.ms overrides removed)
 
 **Force Upgrade (Not Recommended)**:
@@ -117,7 +117,7 @@ remote.log.storage.system.enable=true
 kafka-server-start.sh server.properties
 
 # Manually upgrade feature
-kafka-features.sh upgrade --feature remote.log.storage.version=2
+kafka-features.sh upgrade --feature remote.log.metadata.version=2
 ```
 - Feature version starts at 0 (not automatically upgraded)
 - Topic will be created on first use

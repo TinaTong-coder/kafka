@@ -50,7 +50,7 @@ import java.util.Properties;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Tool to manage remote.log.storage.version upgrades and migrate the __remote_log_metadata topic.
+ * Tool to manage remote.log.metadata.version upgrades and migrate the __remote_log_metadata topic.
  *
  * This tool supports two upgrade paths:
  *
@@ -118,7 +118,7 @@ public class RemoteLogMetadataMigrationTool {
         ArgumentParser parser = ArgumentParsers
             .newArgumentParser("kafka-remote-log-metadata-migration")
             .defaultHelp(true)
-            .description("Tool to manage remote.log.storage.version upgrades and migrate the __remote_log_metadata topic.");
+            .description("Tool to manage remote.log.metadata.version upgrades and migrate the __remote_log_metadata topic.");
 
         parser.addArgument("--bootstrap-server")
             .required(true)
@@ -130,7 +130,7 @@ public class RemoteLogMetadataMigrationTool {
 
         parser.addArgument("--upgrade-to-v1")
             .action(Arguments.storeTrue())
-            .help("Upgrade from remote.log.storage.version=0 to version 1, and configure topic with min.compaction.lag.ms.");
+            .help("Upgrade from remote.log.metadata.version=0 to version 1, and configure topic with min.compaction.lag.ms.");
 
         parser.addArgument("--check")
             .action(Arguments.storeTrue())
@@ -138,7 +138,7 @@ public class RemoteLogMetadataMigrationTool {
 
         parser.addArgument("--upgrade-to-v2")
             .action(Arguments.storeTrue())
-            .help("Upgrade to remote.log.storage.version=2 after validation. Requires --check.");
+            .help("Upgrade to remote.log.metadata.version=2 after validation. Requires --check.");
 
         parser.addArgument("--force")
             .action(Arguments.storeTrue())
@@ -202,7 +202,7 @@ public class RemoteLogMetadataMigrationTool {
     }
 
     private static void performUpgradeToV1(String bootstrapServers, Properties baseProps, long retentionMs) throws Exception {
-        System.out.println("Initiating upgrade to remote.log.storage.version=1...");
+        System.out.println("Initiating upgrade to remote.log.metadata.version=1...");
         System.out.println();
 
         Properties adminProps = new Properties();
@@ -219,7 +219,7 @@ public class RemoteLogMetadataMigrationTool {
 
             short currentVersion = (versionRange != null) ? versionRange.maxVersionLevel() : 0;
 
-            System.out.println("Current remote.log.storage.version: " + currentVersion);
+            System.out.println("Current remote.log.metadata.version: " + currentVersion);
 
             if (currentVersion != 0) {
                 if (currentVersion == 1) {
@@ -526,7 +526,7 @@ public class RemoteLogMetadataMigrationTool {
         System.out.println("Action required:");
         System.out.println("1. Wait for null-key messages to expire based on retention.ms setting");
         System.out.println("2. Then run this tool again to verify all null-key messages are gone");
-        System.out.println("3. Only then proceed with the upgrade to remote.log.storage.version=2");
+        System.out.println("3. Only then proceed with the upgrade to remote.log.metadata.version=2");
         System.out.println();
 
         if (force) {
@@ -544,14 +544,14 @@ public class RemoteLogMetadataMigrationTool {
 
     private static void handleNoNullKeysFound(String bootstrapServers, Properties baseProps, boolean upgradeToV2) throws Exception {
         System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
-        System.out.println("✅ Safe to upgrade to remote.log.storage.version=2.");
+        System.out.println("✅ Safe to upgrade to remote.log.metadata.version=2.");
         System.out.println();
 
         if (upgradeToV2) {
             performUpgradeToV2(bootstrapServers, baseProps);
         } else {
             System.out.println("To upgrade, run:");
-            System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.storage.version=2");
+            System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.metadata.version=2");
             System.out.println();
             System.out.println("Or run this tool with --upgrade-to-v2 to automatically upgrade:");
             System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2");
@@ -604,7 +604,7 @@ public class RemoteLogMetadataMigrationTool {
     }
 
     private static void performUpgradeToV2(String bootstrapServers, Properties baseProps) throws Exception {
-        System.out.println("Initiating upgrade to remote.log.storage.version=2...");
+        System.out.println("Initiating upgrade to remote.log.metadata.version=2...");
         System.out.println();
 
         Properties adminProps = new Properties();
@@ -621,7 +621,7 @@ public class RemoteLogMetadataMigrationTool {
 
             short currentVersion = (versionRange != null) ? versionRange.maxVersionLevel() : 0;
 
-            System.out.println("Current remote.log.storage.version: " + currentVersion);
+            System.out.println("Current remote.log.metadata.version: " + currentVersion);
 
             if (currentVersion == 0) {
                 throw new TerseException(
@@ -654,7 +654,7 @@ public class RemoteLogMetadataMigrationTool {
             admin.updateFeatures(updates, new UpdateFeaturesOptions()).all().get();
 
             System.out.println();
-            System.out.println("✅ Successfully upgraded to remote.log.storage.version=2!");
+            System.out.println("✅ Successfully upgraded to remote.log.metadata.version=2!");
             System.out.println();
             System.out.println("The controller has automatically updated __remote_log_metadata topic configuration:");
             System.out.println("  - cleanup.policy changed to 'compact' (compact-only)");

@@ -519,7 +519,7 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
         topicConfigs.put(TopicConfig.MIN_IN_SYNC_REPLICAS_CONFIG, Short.toString(rlmmConfig.metadataTopicMinIsr()));
 
         // Always use compaction for new topic creation.
-        // For new clusters, remote.log.storage.version will be at the latest (V1) by default.
+        // For new clusters, remote.log.metadata.version will be at the latest (V1) by default.
         // For existing clusters, the topic already exists so this code path is not used.
         // When existing clusters upgrade the feature to V1, the controller will update the
         // existing topic's cleanup policy to compact.
