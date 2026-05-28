@@ -215,7 +215,7 @@ public class RemoteLogMetadataMigrationTool {
                 admin.describeFeatures().featureMetadata().get();
 
             org.apache.kafka.clients.admin.FinalizedVersionRange versionRange =
-                featureMetadata.finalizedFeatures().get(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME);
+                featureMetadata.finalizedFeatures().get(org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME);
 
             short currentVersion = (versionRange != null) ? versionRange.maxVersionLevel() : 0;
 
@@ -270,7 +270,7 @@ public class RemoteLogMetadataMigrationTool {
             System.out.println("Upgrading feature to version 1...");
             Map<String, FeatureUpdate> updates = new HashMap<>();
             updates.put(
-                org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME,
+                org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME,
                 new FeatureUpdate((short) 1, FeatureUpdate.UpgradeType.UPGRADE)
             );
 
@@ -617,7 +617,7 @@ public class RemoteLogMetadataMigrationTool {
                 admin.describeFeatures().featureMetadata().get();
 
             org.apache.kafka.clients.admin.FinalizedVersionRange versionRange =
-                featureMetadata.finalizedFeatures().get(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME);
+                featureMetadata.finalizedFeatures().get(org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME);
 
             short currentVersion = (versionRange != null) ? versionRange.maxVersionLevel() : 0;
 
@@ -647,7 +647,7 @@ public class RemoteLogMetadataMigrationTool {
             System.out.println("Upgrading from version 1 to version 2...");
             Map<String, FeatureUpdate> updates = new HashMap<>();
             updates.put(
-                org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME,
+                org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME,
                 new FeatureUpdate((short) 2, FeatureUpdate.UpgradeType.UPGRADE)
             );
 

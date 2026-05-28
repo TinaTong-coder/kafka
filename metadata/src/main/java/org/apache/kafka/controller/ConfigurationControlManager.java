@@ -767,15 +767,15 @@ public class ConfigurationControlManager {
                 }
             }
 
-            // Handle remote log metadata topic compaction for RemoteLogStorageVersion
-            short remoteLogStorageVersion = updates.getOrDefault(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME, (short) 0);
+            // Handle remote log metadata topic compaction for RemoteLogMetadataVersion
+            short remoteLogMetadataVersion = updates.getOrDefault(org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME, (short) 0);
 
-            if (remoteLogStorageVersion >= 2) {
+            if (remoteLogMetadataVersion >= 2) {
                 // Upgrading to version 2: change to compact-only and remove overrides
                 // Note: Users should run RemoteLogMetadataMigrationTool --check before upgrading
                 logValidationReminder();
                 additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicV2ConfigRecords());
-            } else if (remoteLogStorageVersion >= 1) {
+            } else if (remoteLogMetadataVersion >= 1) {
                 // Upgrading to version 1: enable compaction
                 additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicConfigRecords());
             }

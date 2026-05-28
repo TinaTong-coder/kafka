@@ -19,7 +19,7 @@ package org.apache.kafka.server.common;
 import java.util.Map;
 
 /**
- * Remote log storage feature version controls the cleanup policy for the __remote_log_metadata topic.
+ * Remote log metadata feature version controls the cleanup policy for the __remote_log_metadata topic.
  *
  * <p>Note: Starting from the version that introduces keys (when this feature is added), all remote log
  * metadata messages are produced with keys regardless of the feature level. The feature level only
@@ -31,7 +31,7 @@ import java.util.Map;
  *   <li>Version 2: Removes min.compaction.lag.ms override, reverts to default. Validates no null-key messages remain.</li>
  * </ul>
  */
-public enum RemoteLogStorageVersion implements FeatureVersion {
+public enum RemoteLogMetadataVersion implements FeatureVersion {
 
     /**
      * Version 0: Original implementation.
@@ -60,13 +60,13 @@ public enum RemoteLogStorageVersion implements FeatureVersion {
 
     public static final String FEATURE_NAME = "remote.log.metadata.version";
 
-    public static final RemoteLogStorageVersion LATEST_PRODUCTION = RLS_V2;
+    public static final RemoteLogMetadataVersion LATEST_PRODUCTION = RLS_V2;
 
     private final short featureLevel;
     private final MetadataVersion bootstrapMetadataVersion;
     private final Map<String, Short> dependencies;
 
-    RemoteLogStorageVersion(
+    RemoteLogMetadataVersion(
         int featureLevel,
         MetadataVersion bootstrapMetadataVersion,
         Map<String, Short> dependencies
@@ -109,10 +109,10 @@ public enum RemoteLogStorageVersion implements FeatureVersion {
      * Converts a feature level to its corresponding enum value.
      *
      * @param version the feature level
-     * @return the corresponding RemoteLogStorageVersion
+     * @return the corresponding RemoteLogMetadataVersion
      * @throws RuntimeException if the version is unknown
      */
-    public static RemoteLogStorageVersion fromFeatureLevel(short version) {
+    public static RemoteLogMetadataVersion fromFeatureLevel(short version) {
         switch (version) {
             case 0:
                 return RLS_V0;
@@ -121,7 +121,7 @@ public enum RemoteLogStorageVersion implements FeatureVersion {
             case 2:
                 return RLS_V2;
             default:
-                throw new RuntimeException("Unknown remote log storage feature level: " + (int) version);
+                throw new RuntimeException("Unknown remote log metadata feature level: " + (int) version);
         }
     }
 }

@@ -303,7 +303,7 @@ public class FeatureControlManager {
             }
         } else {
             // Special handling for remote.log.metadata.version
-            if (featureName.equals(org.apache.kafka.server.common.RemoteLogStorageVersion.FEATURE_NAME)) {
+            if (featureName.equals(org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME)) {
                 // Prevent skipping version 1 when upgrading to version 2
                 // This is a data safety requirement: v1 sets up the topic config for safe migration
                 if (currentVersion < 1 && newVersion >= 2) {
