@@ -106,41 +106,24 @@ kafka-remote-log-metadata-migration.sh \
   --upgrade-to-v2 \
   --force
 ```
-Use `--force` to upgrade even if null-key messages exist. **Warning**: Null-key messages will be lost during compaction.
+Use `--force` to upgrade even if null-key messages exist. **Warning**: Null-key messages will be lost during compaction,
+this might lead to data loss.
 
 ### Scenario 3: Existing Cluster Enabling Tiered Storage for First Time
 ```bash
-# Edit server.properties
+# Edit server.properties to enable the remote storage
 remote.log.storage.system.enable=true
 
-# Restart broker
+# Restart broker to run the remote storage functionality and topic will be created with compact cleanup policy
 kafka-server-start.sh server.properties
 
 # Manually upgrade feature
 kafka-features.sh upgrade --feature remote.log.metadata.version=2
 ```
 - Feature version starts at 0 (not automatically upgraded)
-- Topic will be created on first use
-- Can manually upgrade directly to version 2 (no null-key messages exist yet)
-- **No migration required** if upgraded before topic creation
+- Topic will be created with correct configurations on first use
+- The feature value needs to be upgraded to 2 manually while no change will be applied to the topic.
 
-## Key Concepts
-
-**Why retention.ms = min.compaction.lag.ms in Version 1**:
-- `retention.ms`: Null-key messages expire after this period
-- `min.compaction.lag.ms`: Log cleaner waits this long before compacting
-- Setting both equal ensures null-key messages expire via retention BEFORE compaction begins
-- Prevents data loss from premature compaction
-
-## Feature Gate Enforcement
-
-### FeatureControlManager
-Prevents direct upgrade from version 0 to 2:
-```java
-if (currentVersion == 0 && newVersion == 2) {
-    return error("Must upgrade to version 1 first");
-}
-```
 
 ### ConfigurationControlManager
 Automatically updates topic configuration during feature upgrades:
@@ -181,29 +164,8 @@ kafka-remote-log-metadata-migration.sh \
 ### New Code Reading Old Messages
 ✅ Compatible - Consumer reads only the value field
 
-### Tombstone Functionality
-❌ Incompatible with null-key messages - Cannot generate tombstones for segments without keys
-
 ### Rollback
 ⚠️ Version 2 is effectively one-way. Downgrading requires:
 1. Change `cleanup.policy` back to `delete`
 2. Wait for natural message expiration
 3. Consider data loss implications
-
-## Testing
-
-### Unit Tests
-- ✅ New code deserializes old format messages
-- ✅ Tombstone generation with keys
-- ✅ Version 1 upgrade scenarios
-
-### Integration Tests
-- ⏳ Full upgrade path (0 → 1 → 2)
-- ⏳ Validation failure scenarios
-- ⏳ Mixed version clusters
-
-## References
-- Commit introducing keys: `b92795741b`
-- FeatureControlManager: `metadata/src/main/java/org/apache/kafka/controller/FeatureControlManager.java`
-- ConfigurationControlManager: `metadata/src/main/java/org/apache/kafka/controller/ConfigurationControlManager.java`
-- Migration Tool: `tools/src/main/java/org/apache/kafka/tools/RemoteLogMetadataMigrationTool.java`
