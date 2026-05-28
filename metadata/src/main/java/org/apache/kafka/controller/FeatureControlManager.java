@@ -302,17 +302,6 @@ public class FeatureControlManager {
                 return ApiError.NONE;
             }
         } else {
-            // Special handling for remote.log.metadata.version
-            if (featureName.equals(org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME)) {
-                // Prevent skipping version 1 when upgrading to version 2
-                // This is a data safety requirement: v1 sets up the topic config for safe migration
-                if (currentVersion < 1 && newVersion >= 2) {
-                    return invalidUpdateVersion(featureName, newVersion,
-                        "Cannot upgrade to version 2 without going through version 1 first. " +
-                        "Version 1 is required to configure the topic for safe migration from null-key messages.");
-                }
-            }
-
             // Validate dependencies for features that are not metadata.version
             try {
                 Feature.validateVersion(
