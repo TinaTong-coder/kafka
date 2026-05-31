@@ -829,11 +829,11 @@ public class ConfigurationControlManager {
 
     /**
      * Generates ConfigRecords to update the __remote_log_metadata topic to use compaction and deletion
-     * cleanup policy with 30-minute retention.
+     * cleanup policy.
      * This is called when the remote.log.metadata.version feature is being upgraded to level 1 or higher.
      *
-     * The method checks if the topic exists and if it already has the correct configuration.
-     * If updates are needed, it returns a list of ApiMessageAndVersion containing the ConfigRecords.
+     * Note: retention.ms, min.compaction.lag.ms, and segment.ms are configured by the migration script,
+     * not by this method. This method only updates the cleanup.policy to enable compaction.
      *
      * @return List of ConfigRecords if updates are needed, empty list otherwise
      */
@@ -890,8 +890,8 @@ public class ConfigurationControlManager {
      * 3. Removes min.compaction.lag.ms override - uses broker default for immediate compaction eligibility
      *
      * In version 1, the topic used "compact,delete" policy with retention.ms and min.compaction.lag.ms
-     * to safely handle the migration from old-format (null-key) messages. Version 2 transitions to
-     * compact-only policy since all messages now have proper keys.
+     * (configured by migration script) to safely handle the migration from old-format (null-key) messages.
+     * Version 2 transitions to compact-only policy since all messages now have proper keys.
      *
      * This should only be called after validating that no null-key messages remain in the topic,
      * as those messages cannot be compacted and would cause issues in a compact-only topic.

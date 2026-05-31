@@ -27,8 +27,10 @@ import java.util.Map;
  *
  * <ul>
  *   <li>Version 0: Topic uses delete cleanup policy. New code still writes keys for forward compatibility.</li>
- *   <li>Version 1: Topic uses compaction cleanup policy. All messages have keys, enabling effective compaction.</li>
- *   <li>Version 2: Removes min.compaction.lag.ms override, reverts to default. Validates no null-key messages remain.</li>
+ *   <li>Version 1: Topic uses compact,delete cleanup policy. Migration script configures retention.ms and min.compaction.lag.ms
+ *       to safely expire old null-key messages while enabling compaction for new keyed messages.</li>
+ *   <li>Version 2: Topic uses compact-only cleanup policy with infinite retention (retention.ms=-1).
+ *       Removes min.compaction.lag.ms override. Requires validation that no null-key messages remain.</li>
  * </ul>
  */
 public enum RemoteLogMetadataVersion implements FeatureVersion {
@@ -42,19 +44,22 @@ public enum RemoteLogMetadataVersion implements FeatureVersion {
     RLS_V0(0, MetadataVersion.IBP_3_5_IV0, Map.of()),
 
     /**
-     * Version 1: Compaction enabled (targeting 4.6 release).
-     * - Topic uses compaction cleanup policy
-     * - Messages are produced with keys
-     * - Enables space savings through log compaction
-     * - Sets min.compaction.lag.ms to 14 days for safety during initial rollout
+     * Version 1: Compaction enabled.
+     * - Controller updates topic to use compact,delete cleanup policy
+     * - Migration script sets retention.ms and min.compaction.lag.ms (typically 14 days)
+     *   to safely expire old null-key messages while enabling compaction for new keyed messages
+     * - All new messages are produced with keys
+     * - Enables space savings through log compaction while maintaining backward compatibility
      */
     RLS_V1(1, MetadataVersion.IBP_4_4_IV0, Map.of()),
 
     /**
-     * Version 2: Optimized compaction settings.
-     * - Removes min.compaction.lag.ms override (reverts to default)
-     * - Validates that no null-key messages remain in the topic before upgrade
-     * - Allows more aggressive compaction for storage optimization
+     * Version 2: Compact-only mode.
+     * - Controller changes cleanup.policy to compact-only (removes "delete")
+     * - Controller sets retention.ms to -1 (infinite retention)
+     * - Controller removes min.compaction.lag.ms override (uses broker default)
+     * - Requires validation that no null-key messages remain before upgrade
+     * - Enables more aggressive compaction for optimal storage efficiency
      */
     RLS_V2(2, MetadataVersion.IBP_4_4_IV0, Map.of());
 
