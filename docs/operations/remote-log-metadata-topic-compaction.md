@@ -125,11 +125,6 @@ kafka-features.sh upgrade --feature remote.log.metadata.version=2
 - The feature value needs to be upgraded to 2 manually while no change will be applied to the topic.
 
 
-### ConfigurationControlManager
-Automatically updates topic configuration during feature upgrades:
-- Version 1: Applies `compact,delete` policy with retention settings
-- Version 2: Changes to `compact` policy and removes overrides
-
 ## Migration Tool
 
 ### Commands

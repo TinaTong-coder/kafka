@@ -777,7 +777,7 @@ public class ConfigurationControlManager {
                 additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicV2ConfigRecords());
             } else if (remoteLogMetadataVersion >= 1) {
                 // Upgrading to version 1: enable compaction
-                additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicConfigRecords());
+                additionalRecords.addAll(maybeGenerateRemoteLogMetadataTopicV1ConfigRecords());
             }
 
             if (!additionalRecords.isEmpty()) {
@@ -832,12 +832,12 @@ public class ConfigurationControlManager {
      * cleanup policy.
      * This is called when the remote.log.metadata.version feature is being upgraded to level 1 or higher.
      *
-     * Note: retention.ms, min.compaction.lag.ms, and segment.ms are configured by the migration script,
+     * Note: retention.ms and min.compaction.lag.ms are configured by the migration script,
      * not by this method. This method only updates the cleanup.policy to enable compaction.
      *
      * @return List of ConfigRecords if updates are needed, empty list otherwise
      */
-    List<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicConfigRecords() {
+    List<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicV1ConfigRecords() {
         String topicName = "__remote_log_metadata";
         ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
 

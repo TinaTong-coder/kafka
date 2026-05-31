@@ -166,7 +166,6 @@ public class TopicBasedRemoteLogMetadataManager implements BrokerReadyCallback, 
             // These are optimization hints for compaction and don't affect correctness.
             // Index cleanup will happen when the tombstones are consumed by ConsumerTask.
             try {
-                // TODO: need to find a way to check what messages has already been deleted
                 Iterator<String> toBeTombstonedKeys = remotePartitionMetadataStore.listRemoteLogSegmentKeysByEndOffset(
                         topicIdPartition, segmentMetadataUpdate.endOffset(), segmentMetadataUpdate.brokerLeaderEpoch());
 

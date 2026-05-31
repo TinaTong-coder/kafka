@@ -1251,8 +1251,7 @@ public final class QuorumController implements Controller {
                 replicationControl.replay((RemoveTopicRecord) message);
                 break;
             case FEATURE_LEVEL_RECORD:
-                FeatureLevelRecord featureLevelRecord = (FeatureLevelRecord) message;
-                featureControl.replay(featureLevelRecord);
+                featureControl.replay((FeatureLevelRecord) message);
                 break;
             case CLIENT_QUOTA_RECORD:
                 clientQuotaControlManager.replay((ClientQuotaRecord) message);
