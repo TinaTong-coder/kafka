@@ -190,8 +190,6 @@ public class RemoteLogMetadataMigrationTool {
             throw new TerseException("Cannot specify both --upgrade-to-v1 and --check. Use --upgrade-to-v1 for 0->1 upgrade, or --check for 1->2 validation.");
         }
 
-        //TODO: there is no auto-upgrade flag check, needs that logic, without this flag, even though there is no null-key message,
-        // don't upgrade to v2
         if (upgradeToV1) {
             performUpgradeToV1(bootstrapServers, props, retentionMs);
         } else if (check) {
@@ -603,8 +601,6 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-
-    //TODO: do the v2 check before the checking the null key messages
     private static void performUpgradeToV2(String bootstrapServers, Properties baseProps) throws Exception {
         System.out.println("Initiating upgrade to remote.log.metadata.version=2...");
         System.out.println();
