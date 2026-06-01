@@ -136,7 +136,12 @@ public class RemoteLogMetadataMigrationTool {
 
         parser.addArgument("--upgrade-to-v2")
             .action(Arguments.storeTrue())
-            .help("Upgrade to remote.log.metadata.version=2 after validation. Requires --check.");
+            .help("Upgrade to remote.log.metadata.version=2 after validation. Requires --check and --auto-upgrade.");
+
+        parser.addArgument("--auto-upgrade")
+            .action(Arguments.storeTrue())
+            .help("Automatically upgrade to version 2 if validation passes. Must be used with --check --upgrade-to-v2. " +
+                  "This is a safety flag to prevent accidental upgrades.");
 
         parser.addArgument("--force")
             .action(Arguments.storeTrue())
@@ -165,6 +170,7 @@ public class RemoteLogMetadataMigrationTool {
         boolean upgradeToV1 = namespace.getBoolean("upgrade_to_v1");
         boolean check = namespace.getBoolean("check");
         boolean upgradeToV2 = namespace.getBoolean("upgrade_to_v2");
+        boolean autoUpgrade = namespace.getBoolean("auto_upgrade");
         boolean force = namespace.getBoolean("force");
         long retentionMs = namespace.getLong("retention_ms");
         long timeoutMs = namespace.getLong("timeout_ms");
@@ -182,6 +188,10 @@ public class RemoteLogMetadataMigrationTool {
             throw new TerseException("--upgrade-to-v2 requires --check to be specified.");
         }
 
+        if (autoUpgrade && !upgradeToV2) {
+            throw new TerseException("--auto-upgrade can only be used with --upgrade-to-v2.");
+        }
+
         if (force && !upgradeToV2) {
             throw new TerseException("--force can only be used with --upgrade-to-v2.");
         }
@@ -193,7 +203,7 @@ public class RemoteLogMetadataMigrationTool {
         if (upgradeToV1) {
             performUpgradeToV1(bootstrapServers, props, retentionMs);
         } else if (check) {
-            checkForNullKeyMessages(bootstrapServers, props, timeoutMs, upgradeToV2, force);
+            checkForNullKeyMessages(bootstrapServers, props, timeoutMs, upgradeToV2, autoUpgrade, force);
         } else {
             throw new TerseException("No operation specified. Use --upgrade-to-v1 for version 0->1 upgrade, or --check for version 1->2 validation.");
         }
@@ -498,7 +508,7 @@ public class RemoteLogMetadataMigrationTool {
     }
 
     private static void handleScanResults(ScanResult result, Admin admin, String bootstrapServers, Properties baseProps,
-                                          boolean upgradeToV2, boolean force) throws Exception {
+                                          boolean upgradeToV2, boolean autoUpgrade, boolean force) throws Exception {
         System.out.println();
         System.out.println("Scan completed.");
         System.out.println("Total messages scanned: " + result.totalMessages);
@@ -506,14 +516,14 @@ public class RemoteLogMetadataMigrationTool {
         System.out.println();
 
         if (result.nullKeyMessages > 0) {
-            handleNullKeysFound(result, admin, bootstrapServers, baseProps, upgradeToV2, force);
+            handleNullKeysFound(result, admin, bootstrapServers, baseProps, upgradeToV2, autoUpgrade, force);
         } else {
-            handleNoNullKeysFound(bootstrapServers, baseProps, upgradeToV2);
+            handleNoNullKeysFound(bootstrapServers, baseProps, upgradeToV2, autoUpgrade);
         }
     }
 
     private static void handleNullKeysFound(ScanResult result, Admin admin, String bootstrapServers,
-                                            Properties baseProps, boolean upgradeToV2, boolean force) throws Exception {
+                                            Properties baseProps, boolean upgradeToV2, boolean autoUpgrade, boolean force) throws Exception {
         System.out.println("❌ VALIDATION FAILED: Found " + result.nullKeyMessages + " message(s) with null keys.");
         System.out.println();
 
@@ -531,7 +541,7 @@ public class RemoteLogMetadataMigrationTool {
             System.out.println("⚠️  WARNING: --force flag is enabled. Proceeding with upgrade despite null-key messages.");
             System.out.println("⚠️  These null-key messages will be LOST during compaction!");
             System.out.println();
-            if (upgradeToV2) {
+            if (upgradeToV2 && autoUpgrade) {
                 performUpgradeToV2(bootstrapServers, baseProps);
             }
         } else {
@@ -540,19 +550,22 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-    private static void handleNoNullKeysFound(String bootstrapServers, Properties baseProps, boolean upgradeToV2) throws Exception {
+    private static void handleNoNullKeysFound(String bootstrapServers, Properties baseProps, boolean upgradeToV2, boolean autoUpgrade) throws Exception {
         System.out.println("✅ VALIDATION PASSED: No null-key messages found.");
         System.out.println("✅ Safe to upgrade to remote.log.metadata.version=2.");
         System.out.println();
 
-        if (upgradeToV2) {
+        if (upgradeToV2 && autoUpgrade) {
             performUpgradeToV2(bootstrapServers, baseProps);
+        } else if (upgradeToV2 && !autoUpgrade) {
+            System.out.println("To complete the upgrade, add --auto-upgrade flag:");
+            System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2 --auto-upgrade");
         } else {
             System.out.println("To upgrade, run:");
             System.out.println("  kafka-features.sh upgrade --bootstrap-server " + bootstrapServers + " --feature remote.log.metadata.version=2");
             System.out.println();
-            System.out.println("Or run this tool with --upgrade-to-v2 to automatically upgrade:");
-            System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2");
+            System.out.println("Or run this tool with --upgrade-to-v2 --auto-upgrade to automatically upgrade:");
+            System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --upgrade-to-v2 --auto-upgrade");
         }
     }
 
@@ -568,10 +581,36 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean upgradeToV2, boolean force) throws Exception {
+    private static void checkForNullKeyMessages(String bootstrapServers, Properties baseProps, long timeoutMs, boolean upgradeToV2, boolean autoUpgrade, boolean force) throws Exception {
         Properties adminProps = new Properties();
         adminProps.putAll(baseProps);
         adminProps.put("bootstrap.servers", bootstrapServers);
+
+        // Check current version if upgrade is requested
+        if (upgradeToV2 && autoUpgrade) {
+            try (Admin admin = Admin.create(adminProps)) {
+                org.apache.kafka.clients.admin.FeatureMetadata featureMetadata =
+                    admin.describeFeatures().featureMetadata().get();
+
+                org.apache.kafka.clients.admin.FinalizedVersionRange versionRange =
+                    featureMetadata.finalizedFeatures().get(org.apache.kafka.server.common.RemoteLogMetadataVersion.FEATURE_NAME);
+
+                short currentVersion = (versionRange != null) ? versionRange.maxVersionLevel() : 0;
+
+                if (currentVersion >= 2) {
+                    System.out.println("✅ Cluster is already at remote.log.metadata.version=" + currentVersion);
+                    System.out.println("✅ No upgrade needed.");
+                    return;
+                }
+
+                if (currentVersion == 0) {
+                    throw new TerseException(
+                        "Cannot upgrade directly from version 0 to version 2. " +
+                        "Must upgrade to version 1 first using: " +
+                        "kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --upgrade-to-v1");
+                }
+            }
+        }
 
         try (Admin admin = Admin.create(adminProps)) {
             printTopicConfigurationReminder(admin);
@@ -596,7 +635,7 @@ public class RemoteLogMetadataMigrationTool {
             ScanResult result = scanMessagesForNullKeys(consumer, timeoutMs);
 
             try (Admin admin = Admin.create(adminProps)) {
-                handleScanResults(result, admin, bootstrapServers, baseProps, upgradeToV2, force);
+                handleScanResults(result, admin, bootstrapServers, baseProps, upgradeToV2, autoUpgrade, force);
             }
         }
     }
