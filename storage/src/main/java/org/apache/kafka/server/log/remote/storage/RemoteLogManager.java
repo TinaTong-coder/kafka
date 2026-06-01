@@ -551,6 +551,11 @@ public class RemoteLogManager implements Closeable, AsyncOffsetReader {
 
                     removeRemoteTopicPartitionMetrics(tpId);
 
+                    // Clean up leader epoch mapping after all tasks are cancelled
+                    // This is safe because no background tasks will access this entry anymore
+                    topicIdPartitionToLeaderEpochMap.remove(tpId);
+                    LOGGER.debug("Removed leader epoch mapping for partition: {}", tpId);
+
                     if (stopPartition.deleteRemoteLog) {
                         LOGGER.info("Deleting the remote log segments task for partition: {}", tpId);
                         deleteRemoteLogPartition(tpId);

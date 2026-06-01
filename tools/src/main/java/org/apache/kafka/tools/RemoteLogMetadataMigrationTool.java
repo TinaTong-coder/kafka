@@ -158,6 +158,13 @@ public class RemoteLogMetadataMigrationTool {
                   "By setting both retention.ms and min.compaction.lag.ms to the same value, we ensure null-key messages expire naturally via retention " +
                   "before the log cleaner begins compacting. This prevents data loss during the migration period. Used with --upgrade-to-v1.");
 
+        parser.addArgument("--segment-ms")
+            .type(Long.class)
+            .setDefault(86400000L)
+            .help("Segment rolling time in milliseconds for the __remote_log_metadata topic when upgrading to version 1 (default: 86400000, which is 1 day). " +
+                  "This controls how frequently new log segments are created. Smaller values create more segments, which can improve compaction efficiency " +
+                  "but increase overhead. Used with --upgrade-to-v1.");
+
         parser.addArgument("--timeout-ms")
             .type(Long.class)
             .setDefault(60000L)
@@ -173,6 +180,7 @@ public class RemoteLogMetadataMigrationTool {
         boolean autoUpgrade = namespace.getBoolean("auto_upgrade");
         boolean force = namespace.getBoolean("force");
         long retentionMs = namespace.getLong("retention_ms");
+        long segmentMs = namespace.getLong("segment_ms");
         long timeoutMs = namespace.getLong("timeout_ms");
 
         Properties props = new Properties();
@@ -201,7 +209,7 @@ public class RemoteLogMetadataMigrationTool {
         }
 
         if (upgradeToV1) {
-            performUpgradeToV1(bootstrapServers, props, retentionMs);
+            performUpgradeToV1(bootstrapServers, props, retentionMs, segmentMs);
         } else if (check) {
             checkForNullKeyMessages(bootstrapServers, props, timeoutMs, upgradeToV2, autoUpgrade, force);
         } else {
@@ -209,7 +217,7 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-    private static void performUpgradeToV1(String bootstrapServers, Properties baseProps, long retentionMs) throws Exception {
+    private static void performUpgradeToV1(String bootstrapServers, Properties baseProps, long retentionMs, long segmentMs) throws Exception {
         System.out.println("Initiating upgrade to remote.log.metadata.version=1...");
         System.out.println();
 
@@ -241,7 +249,6 @@ public class RemoteLogMetadataMigrationTool {
             // First, update topic configurations before upgrading feature
             // This ensures the controller doesn't overwrite with hardcoded values
             long retentionDays = retentionMs / (24 * 60 * 60 * 1000L);
-            long segmentMs = 7 * 24 * 60 * 60 * 1000L; // 7 days
             long segmentDays = segmentMs / (24 * 60 * 60 * 1000L);
 
             System.out.println("Pre-configuring __remote_log_metadata topic...");
