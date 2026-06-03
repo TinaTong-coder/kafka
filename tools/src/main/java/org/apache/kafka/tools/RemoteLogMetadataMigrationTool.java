@@ -158,13 +158,6 @@ public class RemoteLogMetadataMigrationTool {
                   "By setting both retention.ms and min.compaction.lag.ms to the same value, we ensure null-key messages expire naturally via retention " +
                   "before the log cleaner begins compacting. This prevents data loss during the migration period. Used with --upgrade-to-v1.");
 
-        parser.addArgument("--segment-ms")
-            .type(Long.class)
-            .setDefault(86400000L)
-            .help("Segment rolling time in milliseconds for the __remote_log_metadata topic when upgrading to version 1 (default: 86400000, which is 1 day). " +
-                  "This controls how frequently new log segments are created. Smaller values create more segments, which can improve compaction efficiency " +
-                  "but increase overhead. Used with --upgrade-to-v1.");
-
         parser.addArgument("--timeout-ms")
             .type(Long.class)
             .setDefault(60000L)
@@ -180,7 +173,6 @@ public class RemoteLogMetadataMigrationTool {
         boolean autoUpgrade = namespace.getBoolean("auto_upgrade");
         boolean force = namespace.getBoolean("force");
         long retentionMs = namespace.getLong("retention_ms");
-        long segmentMs = namespace.getLong("segment_ms");
         long timeoutMs = namespace.getLong("timeout_ms");
 
         Properties props = new Properties();
@@ -209,7 +201,7 @@ public class RemoteLogMetadataMigrationTool {
         }
 
         if (upgradeToV1) {
-            performUpgradeToV1(bootstrapServers, props, retentionMs, segmentMs);
+            performUpgradeToV1(bootstrapServers, props, retentionMs);
         } else if (check) {
             checkForNullKeyMessages(bootstrapServers, props, timeoutMs, upgradeToV2, autoUpgrade, force);
         } else {
@@ -217,7 +209,7 @@ public class RemoteLogMetadataMigrationTool {
         }
     }
 
-    private static void performUpgradeToV1(String bootstrapServers, Properties baseProps, long retentionMs, long segmentMs) throws Exception {
+    private static void performUpgradeToV1(String bootstrapServers, Properties baseProps, long retentionMs) throws Exception {
         System.out.println("Initiating upgrade to remote.log.metadata.version=1...");
         System.out.println();
 
@@ -249,16 +241,13 @@ public class RemoteLogMetadataMigrationTool {
             // First, update topic configurations before upgrading feature
             // This ensures the controller doesn't overwrite with hardcoded values
             long retentionDays = retentionMs / (24 * 60 * 60 * 1000L);
-            long segmentDays = segmentMs / (24 * 60 * 60 * 1000L);
 
             System.out.println("Pre-configuring __remote_log_metadata topic...");
             System.out.println("  - cleanup.policy=compact,delete");
             System.out.println("  - retention.ms=" + retentionMs + " (" + retentionDays + " days)");
             System.out.println("  - min.compaction.lag.ms=" + retentionMs + " (same as retention.ms, " + retentionDays + " days)");
-            System.out.println("  - segment.ms=" + segmentMs + " (" + segmentDays + " days)");
             System.out.println();
             System.out.println("IMPORTANT: retention.ms and min.compaction.lag.ms are critical for safe migration.");
-            System.out.println("Once cleanup.policy becomes 'compact,delete', the log cleaner can immediately delete null-key messages during compaction.");
             System.out.println("Setting retention.ms=" + retentionMs + "ms ensures old-format (null-key) messages expire after " + retentionDays + " days.");
             System.out.println("Setting min.compaction.lag.ms to the same value ensures the log cleaner waits " + retentionDays + " days before compacting,");
             System.out.println("allowing null-key messages to expire naturally via retention before compaction begins.");
@@ -271,7 +260,6 @@ public class RemoteLogMetadataMigrationTool {
             configOps.add(new AlterConfigOp(new ConfigEntry("cleanup.policy", "compact,delete"), AlterConfigOp.OpType.SET));
             configOps.add(new AlterConfigOp(new ConfigEntry("retention.ms", String.valueOf(retentionMs)), AlterConfigOp.OpType.SET));
             configOps.add(new AlterConfigOp(new ConfigEntry("min.compaction.lag.ms", String.valueOf(retentionMs)), AlterConfigOp.OpType.SET));
-            configOps.add(new AlterConfigOp(new ConfigEntry("segment.ms", String.valueOf(segmentMs)), AlterConfigOp.OpType.SET));
 
             Map<ConfigResource, Collection<AlterConfigOp>> configs = new HashMap<>();
             configs.put(topicResource, configOps);
@@ -296,34 +284,15 @@ public class RemoteLogMetadataMigrationTool {
             System.out.println();
             System.out.println("==================== NEXT STEPS ====================");
             System.out.println();
-            System.out.println("CRITICAL: You must wait for old messages to be fully deleted before proceeding to version 2.");
+            System.out.println("Wait for the retention period (" + retentionDays + " days) before upgrading to version 2.");
             System.out.println();
-            System.out.println("Expected deletion time: segment.ms + retention.ms = " + segmentDays + " + " + retentionDays + " = " + (segmentDays + retentionDays) + " days");
+            System.out.println("After waiting, run validation and upgrade to version 2:");
+            System.out.println("  kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --auto-upgrade");
             System.out.println();
-            System.out.println("Why this waiting period is necessary:");
-            System.out.println("1. Messages deletion happens in two phases:");
-            System.out.println("   Phase 1 (segment.ms = " + segmentDays + " days):");
-            System.out.println("   - Old-format (null-key) messages stay in active segment");
-            System.out.println("   - Cannot be deleted while in active segment, even if expired");
-            System.out.println();
-            System.out.println("   Phase 2 (retention.ms = " + retentionDays + " days):");
-            System.out.println("   - After segment rolls, messages move to closed segment");
-            System.out.println("   - Messages expire based on retention.ms=" + retentionMs + "ms");
-            System.out.println("   - Log cleaner deletes expired messages");
-            System.out.println();
-            System.out.println("2. During this period:");
-            System.out.println("   - The log cleaner will NOT compact the topic yet (prevented by min.compaction.lag.ms=" + retentionMs + "ms)");
-            System.out.println("   - This ensures null-key messages are deleted via retention, NOT via compaction");
-            System.out.println();
-            System.out.println("3. After waiting " + (segmentDays + retentionDays) + " days, run validation and upgrade to version 2:");
-            System.out.println("   kafka-remote-log-metadata-migration.sh --bootstrap-server " + bootstrapServers + " --check --auto-upgrade");
-            System.out.println();
-            System.out.println("4. The validation check will:");
-            System.out.println("   - Scan the entire __remote_log_metadata topic for any remaining null-key messages");
-            System.out.println("   - Only proceed with upgrade if NO null-key messages are found");
-            System.out.println("   - Change cleanup.policy to 'compact' (removing 'delete')");
-            System.out.println("   - Set retention.ms to -1 (infinite retention)");
-            System.out.println("   - Remove min.compaction.lag.ms override (use broker default)");
+            System.out.println("The validation will:");
+            System.out.println("  - Scan for remaining null-key messages");
+            System.out.println("  - Show estimated cleanup time based on the last null-key message timestamp");
+            System.out.println("  - Suggest retry time if null-key messages still exist");
             System.out.println();
             System.out.println("===================================================");
         }
@@ -400,51 +369,33 @@ public class RemoteLogMetadataMigrationTool {
         try {
             long currentTime = System.currentTimeMillis();
             long messageAgeMs = currentTime - lastNullKeyTimestamp;
-            long messageAgeDays = messageAgeMs / (24 * 60 * 60 * 1000L);
+            long messageAgeHours = messageAgeMs / (60 * 60 * 1000L);
 
-            System.out.println("Last null-key message timestamp: " + lastNullKeyTimestamp);
-            System.out.println("Last null-key message age: " + messageAgeDays + " days (" + (messageAgeMs / (60 * 60 * 1000L)) + " hours)");
+            System.out.println("Last null-key message timestamp: " + lastNullKeyTimestamp + " (" + new java.util.Date(lastNullKeyTimestamp) + ")");
+            System.out.println("Last null-key message age: " + messageAgeHours + " hours");
             System.out.println();
 
             ConfigResource topicResource = new ConfigResource(ConfigResource.Type.TOPIC, METADATA_TOPIC);
             Config topicConfig = admin.describeConfigs(Collections.singleton(topicResource))
                 .all().get().get(topicResource);
             ConfigEntry retentionMsEntry = topicConfig.get(TopicConfig.RETENTION_MS_CONFIG);
-            ConfigEntry segmentMsEntry = topicConfig.get(TopicConfig.SEGMENT_MS_CONFIG);
 
             if (retentionMsEntry != null && retentionMsEntry.value() != null) {
                 long retentionMs = Long.parseLong(retentionMsEntry.value());
-                long retentionDays = retentionMs / (24 * 60 * 60 * 1000L);
-
-                // Get segment.ms (defaults to 7 days if not set)
-                long segmentMs = segmentMsEntry != null && segmentMsEntry.value() != null
-                    ? Long.parseLong(segmentMsEntry.value())
-                    : 7 * 24 * 60 * 60 * 1000L; // 7 days default
-                long segmentDays = segmentMs / (24 * 60 * 60 * 1000L);
-
-                // Actual deletion time = segment.ms + retention.ms
-                // (message stays in active segment for segment.ms, then waits retention.ms in closed segment)
-                long totalWaitMs = segmentMs + retentionMs;
-                long totalWaitDays = totalWaitMs / (24 * 60 * 60 * 1000L);
-                long remainingMs = totalWaitMs - messageAgeMs;
+                long retentionHours = retentionMs / (60 * 60 * 1000L);
+                long remainingMs = retentionMs - messageAgeMs;
 
                 if (remainingMs > 0) {
-                    long remainingDays = remainingMs / (24 * 60 * 60 * 1000L);
-                    long retryTimestamp = lastNullKeyTimestamp + totalWaitMs;
+                    long remainingHours = (long) Math.ceil(remainingMs / (60.0 * 60 * 1000));
+                    long retryTimestamp = lastNullKeyTimestamp + retentionMs;
 
-                    System.out.println("Topic configuration:");
-                    System.out.println("  - segment.ms: " + segmentMs + "ms (" + segmentDays + " days)");
-                    System.out.println("  - retention.ms: " + retentionMs + "ms (" + retentionDays + " days)");
-                    System.out.println("  - Total wait time for deletion: " + totalWaitMs + "ms (" + totalWaitDays + " days)");
+                    System.out.println("Topic retention.ms: " + retentionMs + "ms (" + retentionHours + " hours)");
                     System.out.println();
                     System.out.println("💡 SUGGESTION:");
-                    System.out.println("  Null-key messages will be deleted after: segment.ms + retention.ms = " + totalWaitDays + " days");
-                    System.out.println("  Wait approximately " + remainingDays + " more day(s) for null-key messages to be fully deleted.");
-                    System.out.println("  Retry this validation after: " + new java.util.Date(retryTimestamp));
+                    System.out.println("  Estimated cleanup time: " + new java.util.Date(retryTimestamp));
+                    System.out.println("  Remaining wait time: approximately " + remainingHours + " hours");
                     System.out.println();
-                    System.out.println("  Why this delay?");
-                    System.out.println("  - First " + segmentDays + " days: messages stay in active segment (controlled by segment.ms)");
-                    System.out.println("  - Next " + retentionDays + " days: messages wait for deletion in closed segment (controlled by retention.ms)");
+                    System.out.println("  Please retry this validation after the estimated cleanup time.");
                     System.out.println();
                 }
             }
