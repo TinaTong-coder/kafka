@@ -74,7 +74,7 @@ kafka-remote-log-metadata-migration.sh \
   --retention-ms 1209600000  # 14 days
 ```
 Result:
-- Topic config: `cleanup.policy=compact,delete`, `retention.ms=1209600000`, `min.compaction.lag.ms=1209600000`, `segment.ms=604800000`
+- Topic config: `cleanup.policy=compact,delete`, `retention.ms=1209600000`, `min.compaction.lag.ms=1209600000`
 - Feature: `remote.log.metadata.version=1`
 - New messages have keys, old null-key messages will expire via retention
 
@@ -153,14 +153,3 @@ kafka-remote-log-metadata-migration.sh \
 - Displays retention period reminder before validation
 - Only upgrades if no null-key messages found (unless `--force` is used)
 - `--force` flag available to bypass validation (use with caution)
-
-## Compatibility
-
-### New Code Reading Old Messages
-✅ Compatible - Consumer reads only the value field
-
-### Rollback
-⚠️ Version 2 is effectively one-way. Downgrading requires:
-1. Change `cleanup.policy` back to `delete`
-2. Wait for natural message expiration
-3. Consider data loss implications

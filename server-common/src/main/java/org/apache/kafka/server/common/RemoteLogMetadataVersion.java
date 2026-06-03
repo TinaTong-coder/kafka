@@ -46,7 +46,8 @@ public enum RemoteLogMetadataVersion implements FeatureVersion {
     /**
      * Version 1: Compaction enabled.
      * - Controller updates topic to use compact,delete cleanup policy
-     * - Migration script sets retention.ms and min.compaction.lag.ms (typically 14 days)
+     * - Migration script sets retention.ms and min.compaction.lag.ms (should be set to the same as or longer than
+     * the current retention hours of the __remote_log_metadata topic)
      *   to safely expire old null-key messages while enabling compaction for new keyed messages
      * - All new messages are produced with keys
      * - Enables space savings through log compaction while maintaining backward compatibility
@@ -99,15 +100,6 @@ public enum RemoteLogMetadataVersion implements FeatureVersion {
     @Override
     public Map<String, Short> dependencies() {
         return dependencies;
-    }
-
-    /**
-     * Returns true if the __remote_log_metadata topic should use compaction cleanup policy.
-     *
-     * @return true if feature level >= 1, false otherwise
-     */
-    public boolean shouldUseCompaction() {
-        return featureLevel >= RLS_V1.featureLevel();
     }
 
     /**

@@ -61,5 +61,3 @@ storage/kafka-tiered-storage/
 docker/test/report_*.html
 kafka.Kafka
 __pycache__
-config/log4j2-idea.yaml
-config/server2.properties
