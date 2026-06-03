@@ -208,12 +208,8 @@ public class RemoteLogMetadataCache {
             if (keySet != null) {
                 keySet.remove(metadataKey);
                 // Clean up empty collections
-                if (keySet.isEmpty()) {
-                    epochMap.remove(brokerLeaderEpoch);
-                    if (epochMap.isEmpty()) {
-                        endOffsetToSegments.remove(endOffset);
-                    }
-                }
+                epochMap.computeIfPresent(brokerLeaderEpoch, (k, v) -> v.isEmpty() ? null : v);
+                endOffsetToSegments.computeIfPresent(endOffset, (k, v) -> v.isEmpty() ? null : v);
             }
         }
     }
