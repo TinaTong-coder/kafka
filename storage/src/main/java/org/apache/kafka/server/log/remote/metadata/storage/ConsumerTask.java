@@ -196,7 +196,7 @@ class ConsumerTask implements Runnable, Closeable {
                         log.warn("Failed to parse tombstone key: {}", key, e);
                     }
                 } else {
-                    log.debug("Skipping tombstone with unexpected key format: {}", key);
+                    log.warn("Skipping tombstone with unexpected key format: {}", key);
                 }
             }
             return;

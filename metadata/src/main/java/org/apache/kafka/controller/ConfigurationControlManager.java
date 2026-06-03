@@ -64,6 +64,7 @@ import static org.apache.kafka.common.config.TopicConfig.UNCLEAN_LEADER_ELECTION
 import static org.apache.kafka.common.metadata.MetadataRecordType.CONFIG_RECORD;
 import static org.apache.kafka.common.protocol.Errors.INVALID_CONFIG;
 import static org.apache.kafka.controller.QuorumController.MAX_RECORDS_PER_USER_OP;
+import static org.apache.kafka.server.common.RemoteLogMetadataVersion.REMOTE_LOG_METADATA_TOPIC_NAME;
 import static org.apache.kafka.server.config.ServerLogConfigs.CORDONED_LOG_DIRS_CONFIG;
 
 
@@ -765,6 +766,8 @@ public class ConfigurationControlManager {
                 if (!logMessage.isEmpty()) {
                     log.info("{}", logMessage);
                 }
+                additionalRecords.addAll(result.records());
+                return ControllerResult.atomicOf(additionalRecords, ApiError.NONE);
             }
 
             // Handle remote log metadata topic compaction for RemoteLogMetadataVersion
@@ -838,7 +841,7 @@ public class ConfigurationControlManager {
      * @return List of ConfigRecords if updates are needed, empty list otherwise
      */
     List<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicV1ConfigRecords() {
-        String topicName = "__remote_log_metadata";
+        String topicName = REMOTE_LOG_METADATA_TOPIC_NAME;
         ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
 
         // Check if topic configuration exists
@@ -899,7 +902,7 @@ public class ConfigurationControlManager {
      * @return List of ConfigRecords if updates are needed, empty list otherwise
      */
     List<ApiMessageAndVersion> maybeGenerateRemoteLogMetadataTopicV2ConfigRecords() {
-        String topicName = "__remote_log_metadata";
+        String topicName = REMOTE_LOG_METADATA_TOPIC_NAME;
         ConfigResource topicResource = new ConfigResource(Type.TOPIC, topicName);
 
         // Check if topic configuration exists

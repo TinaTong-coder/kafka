@@ -65,6 +65,7 @@ public enum RemoteLogMetadataVersion implements FeatureVersion {
     RLS_V2(2, MetadataVersion.IBP_4_4_IV0, Map.of());
 
     public static final String FEATURE_NAME = "remote.log.metadata.version";
+    public static final String REMOTE_LOG_METADATA_TOPIC_NAME = "__remote_log_metadata";
 
     public static final RemoteLogMetadataVersion LATEST_PRODUCTION = RLS_V2;
 

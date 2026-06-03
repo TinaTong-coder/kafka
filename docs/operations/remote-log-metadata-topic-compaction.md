@@ -38,9 +38,8 @@ The three-version approach:
 ### Version 1 (Transition)
 - Topic: `cleanup.policy=compact,delete`
 - Configuration:
-  - `retention.ms`: User-specified (e.g., 14 days)
+  - `retention.ms`: User-specified, it's recommended to set to be longer than the maximum retention time across all topics that have remote storage enabled
   - `min.compaction.lag.ms`: Same as retention.ms
-  - `segment.ms`: 7 days
 - Messages: New messages have keys, old messages expire via retention
 - Purpose: Allow null-key messages to expire via retention BEFORE log cleaner begins compacting
 

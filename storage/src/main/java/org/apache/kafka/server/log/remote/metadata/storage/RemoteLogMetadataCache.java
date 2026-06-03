@@ -306,11 +306,6 @@ public class RemoteLogMetadataCache {
             (leaderEpoch, remoteLogLeaderEpochState, startOffset, segmentId) ->
                     remoteLogLeaderEpochState.handleSegmentWithDeleteSegmentFinishedState(segmentId));
 
-        // Note: We do NOT remove from endOffsetToSegments index here.
-        // The index is only removed after tombstone messages are successfully published.
-        // This ensures that if tombstone publishing fails, we can retry on the next restart
-        // by querying the index again when replaying DELETE_SEGMENT_FINISHED.
-
         // Remove the segment's id to metadata mapping because this segment is considered as deleted and it cleared all
         // the state of this segment in the cache.
         idToSegmentMetadata.remove(remoteLogSegmentMetadata.remoteLogSegmentId());

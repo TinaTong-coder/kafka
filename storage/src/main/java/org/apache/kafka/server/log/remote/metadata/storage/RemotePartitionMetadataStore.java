@@ -64,22 +64,6 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
 
     }
 
-    /**
-     * Removes a metadata key from the endOffsetToSegments index in the cache.
-     *
-     * @param topicIdPartition the topic partition
-     * @param endOffset the end offset
-     * @param brokerLeaderEpoch the broker leader epoch
-     * @param metadataKey the metadata key to remove from the index
-     */
-    public void removeFromEndOffsetIndex(TopicIdPartition topicIdPartition, long endOffset, int brokerLeaderEpoch, String metadataKey) {
-        try {
-            getRemoteLogMetadataCache(topicIdPartition).removeFromEndOffsetIndex(endOffset, brokerLeaderEpoch, metadataKey);
-        } catch (RemoteResourceNotFoundException e) {
-            log.warn("Failed to remove metadata key from endOffset index for partition {}: {}", topicIdPartition, e.getMessage());
-        }
-    }
-
     @Override
     public void handleRemoteLogSegmentMetadata(RemoteLogSegmentMetadata remoteLogSegmentMetadata) {
         log.debug("Adding remote log segment: {}", remoteLogSegmentMetadata);
@@ -222,7 +206,7 @@ public class RemotePartitionMetadataStore extends RemotePartitionMetadataEventHa
                       metadataKey, topicIdPartition);
         } catch (RemoteResourceNotFoundException e) {
             // Partition not assigned to this broker or cache not initialized, skip
-            log.debug("Skipping tombstone cleanup for partition {}: {}", topicIdPartition, e.getMessage());
+            log.warn("Skipping tombstone cleanup for partition {}: {}", topicIdPartition, e.getMessage());
         }
     }
 }
